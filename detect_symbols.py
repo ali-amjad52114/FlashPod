@@ -16,7 +16,16 @@
 #     cold start (mount path /runpod-volume per the skill's dev-loop fixture).
 import os
 
-from runpod_flash import Endpoint, GpuGroup, NetworkVolume
+from runpod_flash import DataCenter, Endpoint, GpuGroup, NetworkVolume
+
+# Search every datacenter for GPU supply (module-level constant is fine in a
+# decorator arg — Gotcha #1 only applies to the function body). Maximizes the
+# chance of finding an available GPU when one region is out of stock.
+ALL_DATACENTERS = [
+    DataCenter.US_CA_2, DataCenter.US_IL_1, DataCenter.US_KS_2, DataCenter.US_MO_1,
+    DataCenter.US_MO_2, DataCenter.US_NC_2, DataCenter.US_NE_1, DataCenter.US_WA_1,
+    DataCenter.EU_CZ_1, DataCenter.EU_RO_1, DataCenter.EUR_NO_1,
+]
 
 
 @Endpoint(
@@ -30,6 +39,7 @@ from runpod_flash import Endpoint, GpuGroup, NetworkVolume
     ],
     volume=NetworkVolume(name="flashpod-hf-cache", size=100),
     env={"HF_HOME": "/runpod-volume/hf"},   # persist model weights across cold starts
+    datacenter=ALL_DATACENTERS,             # search all regions for GPU supply
 )
 async def detect_symbols(payload: dict) -> dict:
     """
@@ -136,9 +146,15 @@ async def detect_symbols(payload: dict) -> dict:
         raw = processor.batch_decode(trimmed, skip_special_tokens=True,
                                      clean_up_tokenization_spaces=False)[0]
 
-        # --- parse JSON (tolerate markdown fences / stray prose) ---
-        m = re.search(r"\[.*\]", raw, re.DOTALL)
-        rows = json.loads(m.group(0)) if m else []
+        # --- parse: salvage each {…} object independently, tolerating a truncated
+        # or malformed array tail (the VLM can emit 140+ items and run long, and a
+        # single bad entry must not drop the whole detection set). ---
+        rows = []
+        for obj in re.findall(r"\{[^{}]*\}", raw, re.DOTALL):
+            try:
+                rows.append(json.loads(obj))
+            except Exception:
+                continue
         detections = []
         for r in rows:
             if not isinstance(r, dict):

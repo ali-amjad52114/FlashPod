@@ -58,8 +58,8 @@ export function TopBar(props: { step: Step; jobsCount: number; onJobs: () => voi
       <div style={{ padding: "0 clamp(12px, 4vw, 40px) 8px" }}>
         <span className="chip">
           <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--ok)" }} />
-          <span className="hide-mobile">Runpod CPU endpoint · OpenCV template-matching MVP · no trained model</span>
-          <span className="show-mobile">CPU template-match MVP · no trained model</span>
+          <span className="hide-mobile">Runpod CPU (OpenCV template-match) + GPU (Qwen2.5-VL vision, pretrained) · Bright Data live pricing</span>
+          <span className="show-mobile">Runpod CPU template-match + GPU vision · live pricing</span>
         </span>
       </div>
     </header>

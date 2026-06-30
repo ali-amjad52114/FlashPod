@@ -27,12 +27,17 @@ TIMEOUT: float = float(os.getenv("RUNPOD_TIMEOUT", "120"))
 async def call_analyze_drawing(
     project_name: str,
     image_path: Path,
+    templates: list[dict] | None = None,
 ) -> dict:
     """Build the Runpod payload and POST to the analyze_drawing endpoint.
 
     Args:
         project_name: project label forwarded to the worker.
         image_path: local path to the drawing file.
+        templates: optional list of confirmed symbol templates, each with keys
+            ``sym_type``, ``label``, ``filepath``, ``threshold``. When provided,
+            they're base64-encoded and sent so the worker matches them; when
+            empty/None the worker falls back to its embedded default templates.
 
     Returns:
         The JSON response from the worker:
@@ -44,17 +49,35 @@ async def call_analyze_drawing(
     """
     image_b64 = base64.b64encode(image_path.read_bytes()).decode()
 
+    template_payloads = []
+    for t in templates or []:
+        try:
+            tpl_b64 = base64.b64encode(Path(t["filepath"]).read_bytes()).decode()
+        except OSError:
+            continue  # skip a template whose file went missing; don't fail the takeoff
+        template_payloads.append({
+            "type": t["sym_type"],
+            "label": t["label"],
+            "template_base64": tpl_b64,
+            "threshold": float(t.get("threshold", 0.7)),
+        })
+
     payload = {
         "project_name": project_name,
         "image_base64": image_b64,
+        "templates": template_payloads,
     }
 
     headers: dict[str, str] = {}
     if RUNPOD_API_KEY:
         headers["Authorization"] = f"Bearer {RUNPOD_API_KEY}"
 
+    # Flash QB route expects the Runpod envelope: {"input": {"<arg>": <value>}}.
+    # The worker fn is analyze_drawing(payload=...), so the arg name is "payload".
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        resp = await client.post(RUNPOD_ENDPOINT_URL, json=payload, headers=headers)
+        resp = await client.post(
+            RUNPOD_ENDPOINT_URL, json={"input": {"payload": payload}}, headers=headers
+        )
         resp.raise_for_status()
         return _unwrap(resp.json())
 
