@@ -14,6 +14,8 @@ from ..models import (
     TakeoffRequest,
     Template,
 )
+from ..services.brightdata_client import fetch_unit_prices
+from ..services.pricing import apply_live_prices, build_proposal_text
 from ..services.proposal_export import export_pdf
 from ..services.runpod_client import call_analyze_drawing
 
@@ -79,10 +81,27 @@ async def run_takeoff(
             takeoff.status = "error"
             takeoff.error = result.get("error", "Worker returned error")
         else:
+            priced_items = result.get("priced_items", [])
+            proposal = result.get("proposal")
+
+            # Overlay live Bright Data prices onto the worker's counts. Best-effort:
+            # if pricing is disabled or unreachable, fetch_unit_prices returns {} and
+            # we keep the worker's fallback prices.
+            quotes = await fetch_unit_prices(
+                [
+                    {"sym_type": it["type"], "label": it.get("label", it["type"])}
+                    for it in priced_items
+                ]
+            )
+            if quotes:
+                priced_items, repriced = apply_live_prices(priced_items, quotes)
+                if repriced:
+                    proposal = build_proposal_text(proj.name, priced_items)
+
             takeoff.status = "done"
             takeoff.detections = result.get("detections", [])
-            takeoff.priced_items = result.get("priced_items", [])
-            takeoff.proposal = result.get("proposal")
+            takeoff.priced_items = priced_items
+            takeoff.proposal = proposal
             takeoff.image_size = result.get("image_size")
 
     except Exception as exc:
@@ -135,7 +154,10 @@ def correct_item(
             if body.unit_price is not None:
                 item["unit_price"] = body.unit_price
             item["total"] = round(item["quantity"] * item["unit_price"], 2)
+            item["price_source"] = "manual"
             t.priced_items = items
+            # Keep the proposal text in sync with the corrected totals.
+            t.proposal = build_proposal_text(t.project.name, items)
             db.commit()
             db.refresh(t)
             return t

@@ -71,4 +71,35 @@ async def call_analyze_drawing(
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         resp = await client.post(RUNPOD_ENDPOINT_URL, json=payload, headers=headers)
         resp.raise_for_status()
-        return resp.json()
+        return _unwrap(resp.json())
+
+
+def _unwrap(data: dict) -> dict:
+    """Return the worker's result dict regardless of which runtime answered.
+
+    - ``flash dev`` returns the worker's dict directly.
+    - A deployed Runpod serverless endpoint wraps it:
+      ``{ "status": "COMPLETED", "output": {<worker dict>} }`` on success, or
+      ``{ "status": "FAILED", "error": "..." }`` on failure.
+
+    This normalizes both so the rest of the backend always sees the worker shape
+    (``{ status, detections, priced_items, proposal, ... }``).
+    """
+    if not isinstance(data, dict):
+        return {"status": "error", "error": f"Unexpected worker response: {data!r}"}
+
+    status = data.get("status")
+
+    # Runpod serverless envelope: result lives under "output".
+    if "output" in data and isinstance(data["output"], dict):
+        return data["output"]
+
+    # Runpod job-level failure (no output produced).
+    if status in {"FAILED", "CANCELLED", "TIMED_OUT"}:
+        return {
+            "status": "error",
+            "error": data.get("error") or f"Runpod job {status}",
+        }
+
+    # flash dev / already-unwrapped worker dict.
+    return data
