@@ -23,11 +23,11 @@ import aiohttp
 
 DEFAULT_URL = "http://localhost:8888"
 DEFAULT_ENDPOINT = "/takeoff_worker/runsync"
-# Replace drawing_base64 with a real base64 drawing to load-test detection under burst.
+# Replace image_base64 with a real base64 drawing (+ templates) to load-test under burst.
 DEFAULT_PAYLOAD = {
-    "drawing_base64": "",
+    "project_name": "Load Test",
+    "image_base64": "",
     "templates": [],
-    "run_ocr": False,
 }
 
 

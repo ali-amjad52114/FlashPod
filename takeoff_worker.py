@@ -1,78 +1,74 @@
-# electrical-drawing takeoff worker -- detects + counts symbols, returns bounding boxes + OCR.
-# run with: flash dev
+# FlashPod -- single Runpod Flash endpoint for electrical-drawing takeoff.
+# run with: flash dev   (route: /takeoff_worker/runsync)
 #
-# Two detectors, one worker (choose per-request via "detector"):
-#   "yolo"     -> YOLO11 (ultralytics) inference on a fine-tuned electrical model. BEST accuracy.
-#                 Reference for YOLO-on-drawings: https://github.com/DynMEP/YOLOplan (YOLO11).
-#                 Weights (.pt) live on the NetworkVolume; fine-tune ~20-50 labeled crops.
-#   "template" -> OpenCV multi-scale template matching using your own symbol crops. Works today,
-#                 zero training, exact boxes -- the guaranteed floor for the demo.
+# MVP design (honest): ONE CPU endpoint runs the whole pipeline inline --
+#   decode -> detect symbols (OpenCV template matching) -> count -> price -> proposal.
+# No GPU and no trained model today; the architecture is ready to move detection to a
+# GPU endpoint with a fine-tuned vision model in production.
 #
-# Flash wiring is grounded in the reference examples (per project rule); only the CV/OCR logic
-# inside the body is app domain code (reference ships no CV worker):
-#   - model-in-body + deps + status dict:  02_ml_inference/01_text_to_speech/gpu_worker.py
-#   - NetworkVolume + env weight-cache + datacenter:  05_data_workflows/01_network_volumes/gpu_worker.py
-#   - opencv-python + system_dependencies ["ffmpeg","libgl1"]:  01_getting_started/04_dependencies/gpu_worker.py
-#   - handler signature async def fn(input_data: dict) -> dict:  01_hello_world/gpu_worker.py
-from runpod_flash import Endpoint, GpuGroup, DataCenter, NetworkVolume
-
-MODEL_PATH = "/runpod-volume/models"          # weights + OCR cache persist here across cold starts
-volume = NetworkVolume(
-    name="flashpod-takeoff-volume",
-    size=20,
-    datacenter=DataCenter.EU_RO_1,
-)
+# Flash wiring grounded in the reference examples + official skill (.agents/skills/flash):
+#   - @Endpoint(name=..., cpu=..., workers=..., dependencies=[...]) on an async function (QB mode)
+#   - SKILL Gotcha #1: ONLY the function body ships under `flash dev`, so ALL imports,
+#     constants, and helpers live INSIDE the body (a module-level name would NameError remotely).
+from runpod_flash import Endpoint
 
 
 @Endpoint(
-    name="flashpod_takeoff",
-    gpu=GpuGroup.ADA_24,
-    workers=(0, 3),
-    idle_timeout=300,
-    datacenter=DataCenter.EU_RO_1,
-    volume=volume,
-    env={"HF_HUB_CACHE": MODEL_PATH, "EASYOCR_MODULE_PATH": MODEL_PATH},
-    dependencies=["ultralytics", "opencv-python", "easyocr", "numpy"],
-    system_dependencies=["ffmpeg", "libgl1"],
+    name="flashpod-takeoff",
+    cpu="cpu5c-4-8",            # 4 vCPU / 8GB -- enough for OpenCV template matching
+    workers=(1, 1),            # keep 1 worker warm -> no cold start during the demo
+    dependencies=["opencv-python", "pillow", "numpy", "requests"],
 )
-async def detect(input_data: dict) -> dict:
+async def analyze_drawing(payload: dict) -> dict:
     """
-    Detect + count electrical symbols on a drawing, returning per-symbol bounding boxes.
-
     Input:
-        drawing_base64: str         - the drawing image (PNG/JPG) as base64
-        detector: "yolo" | "template"  (default "template")
-        run_ocr: bool               - also OCR text labels/panels (default True)
+        project_name: str
+        image_base64: str                     - the drawing (PNG/JPG) as base64
+        templates: list[dict] (optional)      - symbol crops to match, each:
+            { "type": str, "label": str, "template_base64": str, "threshold": float? }
 
-      detector="yolo":
-        weights: str                - .pt filename on the volume (default "electrical.pt")
-        conf: float                 - confidence threshold (default 0.25)
-      detector="template":
-        templates: [{ "type", "template_base64", "threshold"? }]
+    Output:
+        detections:   [{ type, label, x, y, w, h, confidence }]   - one per detected symbol
+        priced_items: [{ type, label, quantity, unit_price, total, boxes }]  - grouped + priced
+        proposal:     str                                          - formatted proposal text
+        project_name, image_size
 
-    Returns:
-        status, line_items: [{ "type", "count", "boxes": [[x,y,w,h], ...] }], ocr, image_size
-
-    boxes power the traceability wow-feature: clicking "Duplex: 42" highlights those boxes.
+    The frontend uses priced_items[].boxes for the wow feature:
+    click a proposal line -> highlight every matching symbol on the drawing.
     """
     import base64
-    import os
     from datetime import datetime
+    from io import BytesIO
 
     import cv2
     import numpy as np
+    from PIL import Image
 
-    # Flash dev ships ONLY this body -- define paths here, not at module level (SKILL Gotcha #1).
-    model_path = os.getenv("EASYOCR_MODULE_PATH") or "/runpod-volume/models"
+    # --- constants/helpers live INSIDE the body (SKILL Gotcha #1) ---
+    PRICE_MAP = {
+        "duplex_outlet": 4.25,
+        "gfci_outlet": 18.50,
+        "data_drop": 12.00,
+        "switch": 3.25,
+        "light": 45.00,
+        "panel": 320.00,
+    }
+    LABELS = {
+        "duplex_outlet": "Duplex Outlet",
+        "gfci_outlet": "GFCI Outlet",
+        "data_drop": "Data Drop",
+        "switch": "Switch",
+        "light": "Light Fixture",
+        "panel": "Panel",
+    }
+    DEFAULT_UNIT_PRICE = 5.00
 
-    def _decode_gray(b64: str) -> "np.ndarray":
-        buf = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
-        img = cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            raise ValueError("could not decode image from base64")
-        return img
+    def decode_gray(b64: str) -> "np.ndarray":
+        raw = base64.b64decode(b64)
+        pil = Image.open(BytesIO(raw)).convert("L")   # Pillow load -> grayscale
+        return np.array(pil)
 
-    def _nms(boxes, scores, iou_thresh=0.3):
+    def nms(boxes, scores, iou_thresh=0.3):
         if not boxes:
             return []
         b = np.array(boxes, dtype=float)
@@ -95,41 +91,27 @@ async def detect(input_data: dict) -> dict:
             order = order[1:][iou < iou_thresh]
         return keep
 
-    def _detect_yolo(drawing_b64: str, weights: str, conf: float) -> list:
-        """YOLO11 inference -> line_items grouped by class. BEST accuracy path."""
-        from collections import defaultdict
+    # --- 1. validate + decode ---
+    project_name = payload.get("project_name", "Electrical Takeoff")
+    image_b64 = payload.get("image_base64")
+    templates = payload.get("templates") or []
+    if not image_b64:
+        return {"status": "error", "error": "Provide 'image_base64'."}
 
-        from ultralytics import YOLO
+    try:
+        drawing = decode_gray(image_b64)
 
-        weights_path = os.path.join(model_path, weights)
-        if not os.path.exists(weights_path):
-            raise FileNotFoundError(
-                f"YOLO weights not found at {weights_path}. Upload a fine-tuned .pt to the volume, "
-                f"or use detector='template'."
-            )
-        buf = np.frombuffer(base64.b64decode(drawing_b64), dtype=np.uint8)
-        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-
-        model = YOLO(weights_path)
-        result = model.predict(img, conf=conf, verbose=False)[0]
-        names = result.names
-        grouped = defaultdict(list)
-        for box in result.boxes:
-            cls = names[int(box.cls[0])]
-            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0].tolist())
-            grouped[cls].append([x1, y1, x2 - x1, y2 - y1])
-        return [{"type": t, "count": len(b), "boxes": b} for t, b in grouped.items()]
-
-    def _detect_template(drawing: "np.ndarray", templates: list) -> list:
-        """OpenCV multi-scale template matching -> line_items. Works today with your crops."""
-        line_items = []
+        # --- 2. detect symbols (multi-scale OpenCV template matching) ---
+        detections = []
         for tpl in templates:
             sym_type = tpl.get("type", "symbol")
+            label = tpl.get("label", LABELS.get(sym_type, sym_type.replace("_", " ").title()))
             tpl_b64 = tpl.get("template_base64")
             threshold = float(tpl.get("threshold", 0.7))
             if not tpl_b64:
                 continue
-            template = _decode_gray(tpl_b64)
+            template = decode_gray(tpl_b64)
+
             boxes, scores = [], []
             for scale in (0.8, 0.9, 1.0, 1.1, 1.25):
                 th = max(8, int(template.shape[0] * scale))
@@ -142,55 +124,59 @@ async def detect(input_data: dict) -> dict:
                 for x, y in zip(xs.tolist(), ys.tolist()):
                     boxes.append([int(x), int(y), int(tw), int(th)])
                     scores.append(float(res[y, x]))
-            keep = _nms(boxes, scores, iou_thresh=0.3)
-            kept = [boxes[i] for i in keep]
-            line_items.append({"type": sym_type, "count": len(kept), "boxes": kept})
-        return line_items
 
-    drawing_b64 = input_data.get("drawing_base64")
-    detector = input_data.get("detector", "template")
-    run_ocr = input_data.get("run_ocr", True)
-
-    if not drawing_b64:
-        return {"status": "error", "error": "Provide 'drawing_base64'."}
-
-    try:
-        drawing = _decode_gray(drawing_b64)
-
-        if detector == "yolo":
-            line_items = _detect_yolo(
-                drawing_b64,
-                input_data.get("weights", "electrical.pt"),
-                float(input_data.get("conf", 0.25)),
-            )
-        else:
-            line_items = _detect_template(drawing, input_data.get("templates") or [])
-
-        ocr_results = []
-        if run_ocr:
-            import easyocr
-
-            reader = easyocr.Reader(
-                ["en"],
-                gpu=True,
-                model_storage_directory=model_path,
-            )
-            for bbox, text, conf in reader.readtext(drawing):
-                xs = [int(p[0]) for p in bbox]
-                ys = [int(p[1]) for p in bbox]
-                ocr_results.append(
+            for i in nms(boxes, scores, iou_thresh=0.3):
+                x, y, w, h = boxes[i]
+                detections.append(
                     {
-                        "text": text,
-                        "confidence": round(float(conf), 3),
-                        "box": [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)],
+                        "type": sym_type,
+                        "label": label,
+                        "x": x, "y": y, "w": w, "h": h,
+                        "confidence": round(scores[i], 3),
                     }
                 )
 
+        # --- 3 + 4. count + price (group detections by type) ---
+        priced_items = []
+        subtotal = 0.0
+        types_in_order = []
+        for d in detections:
+            if d["type"] not in types_in_order:
+                types_in_order.append(d["type"])
+        for sym_type in types_in_order:
+            group = [d for d in detections if d["type"] == sym_type]
+            qty = len(group)
+            unit = float(PRICE_MAP.get(sym_type, DEFAULT_UNIT_PRICE))
+            total = round(unit * qty, 2)
+            subtotal += total
+            priced_items.append(
+                {
+                    "type": sym_type,
+                    "label": group[0]["label"],
+                    "quantity": qty,
+                    "unit_price": unit,
+                    "total": total,
+                    "boxes": [[d["x"], d["y"], d["w"], d["h"]] for d in group],
+                }
+            )
+
+        # --- 5. proposal ---
+        lines = [f"FlashPod Electrical Proposal — {project_name}",
+                 f"Date: {datetime.now():%Y-%m-%d}", ""]
+        lines.append(f"{'Item':<20}{'Qty':>6}{'Unit':>12}{'Total':>14}")
+        lines.append("-" * 52)
+        for it in priced_items:
+            lines.append(f"{it['label']:<20}{it['quantity']:>6}{it['unit_price']:>12.2f}{it['total']:>14.2f}")
+        lines.append("-" * 52)
+        lines.append(f"{'SUBTOTAL':<38}{round(subtotal, 2):>14.2f}")
+
+        # --- 6. return JSON ---
         return {
             "status": "success",
-            "detector": detector,
-            "line_items": line_items,
-            "ocr": ocr_results,
+            "project_name": project_name,
+            "detections": detections,
+            "priced_items": priced_items,
+            "proposal": "\n".join(lines),
             "image_size": {"width": int(drawing.shape[1]), "height": int(drawing.shape[0])},
             "timestamp": datetime.now().isoformat(),
         }
@@ -202,8 +188,5 @@ async def detect(input_data: dict) -> dict:
 if __name__ == "__main__":
     import asyncio
 
-    # Mirrors the reference __main__ blocks. NOTE: an @Endpoint call dispatches to a deployed
-    # worker -- run under `flash dev` (or after `flash deploy`), not as bare `python takeoff_worker.py`.
-    payload = {"drawing_base64": "", "detector": "template", "templates": [], "run_ocr": False}
-    print("Takeoff worker smoke test (empty payload -> expect validation error):")
-    print(asyncio.run(detect(payload)))
+    # NOTE: an @Endpoint call dispatches to a worker -- run under `flash dev`, not bare python.
+    print(asyncio.run(analyze_drawing({"project_name": "Test", "image_base64": "", "templates": []})))

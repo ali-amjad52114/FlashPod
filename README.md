@@ -1,93 +1,96 @@
-# FlashPod — Runpod Flash hackathon starter
+# FlashPod
 
-Python-first serverless GPU on [Runpod Flash](https://docs.runpod.io/flash/quickstart).
-No Dockerfile, no image to manage — declare GPU + deps in Python, Flash runs it.
+**Turn an electrical drawing into a priced proposal where every quantity links back to the drawing.**
 
-## Setup (done)
+Upload a drawing → FlashPod detects and counts electrical symbols, prices the materials, and
+generates a proposal. The wow feature is **traceability**: click *"Duplex Outlet: 42"* and the
+drawing highlights all 42 detected symbols — so the estimate is explainable, not just automated.
 
-- `.venv` on **Python 3.12** (Flash GPU workers run 3.12; your system 3.14 won't work, so this is pinned)
-- `runpod-flash` 1.17.0 + `python-dotenv` installed
+> Estimators don't just need a quote. They need to prove where the quote came from. FlashPod
+> turns electrical drawings into priced proposals, and every number links back to the drawing.
 
-## ⚠️ Windows note (already fixed, but know why)
+## How FlashPod uses Runpod
 
-Flash isn't officially Windows-supported, and the CLI prints emoji/box-drawing
-output that **crashes on Windows' default cp1252 console** with
-`UnicodeEncodeError: 'charmap' codec can't encode`. Verified fix: run Python in
-UTF-8 mode. This repo's machine now has a **persistent** `PYTHONUTF8=1` user env
-var set (`setx PYTHONUTF8 1`), so any new terminal is fine. If you ever see that
-crash on another machine, run `setx PYTHONUTF8 1` and open a fresh terminal.
-Verified working on Windows: `flash --version`, `flash init`, scaffold + symlink
-creation. Auth is done via `.env` (`RUNPOD_API_KEY`), so `flash login`'s browser
-flow is not needed. Key is **valid** (checked); the only remaining gap is a **$0
-Runpod balance** — add credits before `flash deploy`.
+Runpod Flash is our **remote execution layer**. An endpoint is a Python function decorated with
+`@Endpoint`; it runs on a Runpod worker instead of the browser. When called, Flash provisions or
+reuses a worker, ships the code + input, runs it, and returns the result.
 
-## Files (flat-file workers, mirroring flash-examples conventions)
+> FlashPod runs the drawing-takeoff pipeline as a remote Python endpoint on Runpod Flash. A warm
+> Runpod worker receives the uploaded drawing, runs OpenCV-based symbol detection, counts items,
+> attaches pricing, and returns structured JSON. The React frontend only displays the result and
+> handles the interactive highlight feature. For the hackathon we use **one CPU endpoint** for
+> reliability; the production version can split detection into a **GPU endpoint** running a
+> fine-tuned vision model.
 
-Each worker is a standalone file with one `@Endpoint async def handler(input_data: dict) -> dict`,
-auto-discovered by `flash dev`. This matches `reference/flash-examples/` exactly.
+**Honest scope:** today's MVP is OpenCV template matching on a **CPU** endpoint — it genuinely
+doesn't need a GPU, and we did **not** train a model. The architecture is ready for a fine-tuned
+detector on GPU (see *Production* below).
 
-| File | Mirrors | What it is |
-|------|---------|------------|
-| `gpu_worker.py` | `01_hello_world` | GPU detection — your "is it working" check. Route: `/gpu_worker/runsync` |
-| `embeddings_worker.py` | `02_ml_inference` | Real ML: batch text → embeddings (BAAI/bge-small) for semantic search/RAG. Route: `/embeddings_worker/runsync` |
-| `brightdata_demo.py` | `03_mixed_workers/pipeline.py` | Imports & awaits `embed` — Bright Data scrape → embed → cosine rank. The venue pairing. |
-| `load_test.py` | `04_scaling_performance/01_autoscaling` | 4-phase warm/burst/pause/burst load test — **the autoscaling demo tool.** |
-| `scripts/check_account.py` | — | Validate API key + read Runpod balance (no GPU, no cost). |
+## Endpoint design (MVP = one endpoint)
 
-**Project ideas:** see [IDEAS.md](IDEAS.md). **Account balance is $0** — get Runpod credits before deploying.
-
-## Tomorrow morning, in order
-
-1. **Confirm auth + balance** (key already in `.env`):
-   ```bash
-   uv run python scripts/check_account.py     # need clientBalance > 0 to deploy
-   ```
-2. **Local-test a handler** without touching the cloud (runs the `__main__` block; note: heavy
-   deps like torch only exist on the worker, so full local runs need `flash dev`):
-   ```bash
-   uv run flash dev                            # serves all workers at localhost:8888/docs
-   ```
-   Then open http://localhost:8888/docs, or:
-   ```bash
-   curl -X POST http://localhost:8888/gpu_worker/runsync -H "Content-Type: application/json" -d '{"message":"hi"}'
-   ```
-3. **Show autoscaling** (with `flash dev` running in another terminal):
-   ```bash
-   uv run python load_test.py --requests 30 --concurrency 12
-   ```
-4. **Deploy for real** when ready:
-   ```bash
-   uv run flash deploy
-   ```
-
-## API cheat-sheet (verified against 1.17.0)
+`flashpod-takeoff` → [`takeoff_worker.py`](takeoff_worker.py) → `analyze_drawing()` does the whole
+pipeline inline: decode → detect → count → price → proposal. One endpoint = one worker, one config,
+one failure point — buildable fast and reliable for the demo.
 
 ```python
-from runpod_flash import Endpoint, GpuType, GpuGroup
-
 @Endpoint(
-    name="my_worker",
-    gpu=GpuType.NVIDIA_GEFORCE_RTX_4090,   # or GpuGroup.ADA_24 / AMPERE_80 / HOPPER_141 ...
-    workers=(0, 3),                        # (min, max); min=0 => scale to zero => no idle cost
-    idle_timeout=300,                      # seconds
-    dependencies=["sentence-transformers"],   # pip-installed on the worker
+    name="flashpod-takeoff",
+    cpu="cpu5c-4-8",
+    workers=(1, 1),            # keep 1 worker warm -> no cold start during the pitch
+    dependencies=["opencv-python", "pillow", "numpy", "requests"],
 )
-async def my_worker(input_data: dict) -> dict:   # dict in, dict out
-    import torch                                  # remote-dep imports go INSIDE the body
-    return {"status": "success"}
+async def analyze_drawing(payload: dict) -> dict:
+    import cv2, numpy as np            # imports INSIDE the body (only the body ships to the worker)
+    ...
 ```
 
-- Run locally: `flash dev` (auto-discovers workers → `/<filename>/runsync`). Deploy: `flash deploy`.
-- Other params: `volume` (NetworkVolume for weight caching), `system_dependencies` (apt), `env`,
-  `flashboot`, `max_concurrency`, `gpu_count`. CPU + HTTP routing also exist (`cpu=`, `@api.post`).
-- Manage: `uv run flash undeploy list` · `uv run flash undeploy <name>`
+## API contract
 
-## Demo strategy (what wins)
+**Frontend → Runpod** (`POST /takeoff_worker/runsync`):
+```json
+{ "project_name": "Office Electrical Takeoff", "image_base64": "...",
+  "templates": [ { "type": "duplex_outlet", "label": "Duplex Outlet", "template_base64": "...", "threshold": 0.7 } ] }
+```
 
-- **Show the superpower live.** Run `load_test.py` against your endpoint with the Runpod console
-  next to it — judges *see* workers spin 0→N and the cold-vs-warm latency gap. That's the story.
-- **Lead with scale-to-zero cost.** "min=0 means we pay nothing idle, burst to N GPUs on demand."
-  Cost awareness is on the judging rubric.
-- **Pair with Bright Data** — real scrape feeding real GPU inference covers the bonus categories.
-- **One workload, deep.** Swap the `embed` body for Whisper / captioning / SDXL — same structure.
-- **Have a fallback.** `brightdata_demo.py` keeps a sample-data path so a live hiccup never blanks the screen.
+**Runpod → Frontend:**
+```json
+{
+  "detections":   [ { "type": "duplex_outlet", "label": "Duplex Outlet", "x": 420, "y": 310, "w": 24, "h": 24, "confidence": 0.91 } ],
+  "priced_items": [ { "type": "duplex_outlet", "label": "Duplex Outlet", "quantity": 42, "unit_price": 4.25, "total": 178.50, "boxes": [[420,310,24,24], ...] } ],
+  "proposal": "FlashPod Electrical Proposal ..."
+}
+```
+The frontend highlights `priced_items[].boxes` when a proposal line is clicked.
+
+> **Note:** template matching needs symbol templates. The MVP accepts them as an optional
+> `templates` array (legend crops sent by the frontend). Production replaces this with a trained
+> detector that needs no templates.
+
+## Run it
+
+```bash
+uv run python scripts/check_account.py   # confirm Runpod key + balance (> 0 to run)
+uv run flash dev                         # local server; functions run on a remote Runpod worker
+# POST a drawing to http://localhost:8888/takeoff_worker/runsync
+uv run flash deploy                      # ship a stable endpoint
+uv run flash undeploy --all --force      # tear down workers when done (stop billing)
+```
+
+Auth: put `RUNPOD_API_KEY` in `.env` (see `.env.example`). On Windows, `PYTHONUTF8=1` avoids a
+CLI console-encoding crash.
+
+## Production (future, not built today)
+
+Split into focused endpoints; move detection to GPU:
+
+| Stage | Endpoint | Hardware | Model |
+|-------|----------|----------|-------|
+| Detect symbols | `detect_symbols_gpu()` | Runpod GPU | fine-tuned YOLO-style detector |
+| OCR / legend | `ocr_and_parse()` | CPU/GPU | PaddleOCR |
+| Price | `price_items()` | CPU | Bright Data + normalization |
+| Proposal | `generate_proposal()` | CPU/GPU | LLM or template |
+
+## Files
+- [`takeoff_worker.py`](takeoff_worker.py) — the single CPU endpoint (full pipeline)
+- [`load_test.py`](load_test.py) — autoscaling/load demo against the endpoint
+- [`scripts/check_account.py`](scripts/check_account.py) — validate API key + balance
