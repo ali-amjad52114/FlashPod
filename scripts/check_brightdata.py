@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 token = os.environ.get("BRIGHTDATA_API_KEY")
-zone = os.environ.get("BRIGHTDATA_SERP_ZONE", "serp_api")
+zone = os.environ.get("BRIGHTDATA_SERP_ZONE", "serp_api1")
 if not token:
     raise SystemExit("BRIGHTDATA_API_KEY not set in .env")
 

@@ -1,22 +1,20 @@
-"""FlashPod pricing — Bright Data scraper + symbol→SKU mapping + cached catalog.
+"""FlashPod pricing — dynamic, description-driven material pricing via Bright Data SERP.
 
-Offline tooling that turns detected electrical symbols into real, sourced prices:
-    symbol_sku  -> what we price (symbol type -> product + search query)
-    scraper     -> Bright Data SERP API -> multi-supplier Google Shopping offers
-    catalog     -> offer selection + cached catalog.json + worker pricebook
+The vision LLM emits variable line items ({type, count, description}); this package turns each
+into a Google Shopping query, returns every supplier offer, and totals the line. No fixed catalog.
 
-The takeoff worker never imports this package (Flash ships only the function body); it carries
-an EMBEDDED_PRICEBOOK generated from catalog.json by `python -m pricing.embed_pricebook`.
+    from pricing import price_line_items
+    priced = price_line_items([{ "type": "DGPO Outlet", "count": 107,
+                                 "description": "General double power outlet" }])
 """
-from .catalog import Offer, build_pricebook, load_catalog, select_best_offer
-from .symbol_sku import SKU_BY_TYPE, SKU_SPECS, SkuSpec
+from .pricing import PriceCache, build_query, price_line_items
+from .scraper import Offer, parse_offers, scrape_query
 
 __all__ = [
+    "price_line_items",
+    "build_query",
+    "PriceCache",
     "Offer",
-    "SkuSpec",
-    "SKU_SPECS",
-    "SKU_BY_TYPE",
-    "select_best_offer",
-    "build_pricebook",
-    "load_catalog",
+    "scrape_query",
+    "parse_offers",
 ]

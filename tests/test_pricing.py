@@ -1,163 +1,112 @@
-"""Unit tests for the pricing core — offer selection, catalog assembly, pricebook, embedding.
-
-All network-free: the Bright Data scraper's parsing is tested against canned dicts, never a
-live request.
+"""Unit tests for the dynamic pricing module — query building, offer parsing (no filtering),
+caching, and line pricing. All network-free: scraping is monkeypatched.
 """
 import json
 
 import pytest
 
-from pricing import build_catalog
-from pricing.catalog import (
-    Offer,
-    assemble_catalog,
-    build_catalog_item,
-    build_pricebook,
-    load_catalog,
-    select_best_offer,
-)
-from pricing.embed_pricebook import inject, render_literal
-from pricing.scraper import _to_price, parse_offers
-from pricing.symbol_sku import SKU_BY_TYPE, SKU_SPECS
+from pricing import pricing as pricing_mod
+from pricing.pricing import PriceCache, build_query, fallback_unit_price, price_line_items
+from pricing.scraper import Offer, parse_offers
 
 
-# --- select_best_offer -------------------------------------------------------
-def test_picks_cheapest_in_stock():
-    offers = [
-        Offer("Grainger", 5.10, in_stock=True),
-        Offer("Home Depot", 4.25, in_stock=True),
-        Offer("Lowe's", 4.80, in_stock=True),
-    ]
-    assert select_best_offer(offers).supplier == "Home Depot"
-
-
-def test_ignores_out_of_stock_even_if_cheaper():
-    offers = [
-        Offer("CheapButGone", 1.00, in_stock=False),
-        Offer("Home Depot", 4.25, in_stock=True),
-    ]
-    assert select_best_offer(offers).supplier == "Home Depot"
-
-
-def test_falls_back_to_cheapest_when_none_in_stock():
-    offers = [Offer("A", 9.0, in_stock=False), Offer("B", 7.0, in_stock=False)]
-    assert select_best_offer(offers).supplier == "B"
-
-
-def test_tie_breaks_toward_preferred_supplier():
-    offers = [Offer("Random Seller", 4.25), Offer("Home Depot", 4.25)]
-    assert select_best_offer(offers).supplier == "Home Depot"
-
-
-def test_empty_offers_returns_none():
-    assert select_best_offer([]) is None
-
-
-def test_floor_price_drops_junk_listings():
-    # $0.01 "switch" is junk vs a $2.80 reference -> floor skips it, takes next cheapest.
-    offers = [Offer("Junk", 0.01), Offer("Home Depot", 3.52), Offer("Grainger", 3.90)]
-    assert select_best_offer(offers, floor_price=0.4 * 2.80).supplier == "Home Depot"
-
-
-def test_floor_price_falls_back_if_it_removes_everything():
-    offers = [Offer("A", 0.50), Offer("B", 0.60)]
-    assert select_best_offer(offers, floor_price=100.0).price == 0.50
-
-
-# --- catalog item / fallback -------------------------------------------------
-def test_item_uses_fallback_when_no_offers():
-    spec = SKU_BY_TYPE["duplex_outlet"]
-    item = build_catalog_item(spec, [])
-    assert item["offer_count"] == 0
-    assert item["selected"]["price"] == spec.fallback_price
-    assert "fallback" in item["selected"]["supplier"]
-
-
-def test_assemble_catalog_covers_every_spec():
-    catalog = assemble_catalog({}, generated_at="t", source="test")
-    assert set(catalog["items"]) == {s.type for s in SKU_SPECS}
-
-
-# --- pricebook ---------------------------------------------------------------
-def test_build_pricebook_shape():
-    catalog = assemble_catalog(
-        {"switch": [Offer("Home Depot", 2.67, "https://hd", True)]},
-        generated_at="t",
-        source="test",
+# --- query building ----------------------------------------------------------
+def test_query_prefers_description():
+    assert build_query({"type": "X", "description": "General double power outlet"}).startswith(
+        "General double power outlet"
     )
-    pb = build_pricebook(catalog)
-    assert pb["switch"]["unit_price"] == 2.67
-    assert pb["switch"]["supplier"] == "Home Depot"
-    assert pb["switch"]["source_url"] == "https://hd"
-    assert pb["switch"]["sku"] == SKU_BY_TYPE["switch"].sku
 
 
-# --- scraper parsing (defensive, no network) ---------------------------------
-@pytest.mark.parametrize(
-    "raw,expected",
-    [("$4.25", 4.25), ("1,234.50", 1234.50), (3, 3.0), ("Out of stock", None), (None, None)],
-)
-def test_to_price(raw, expected):
-    assert _to_price(raw) == expected
+def test_query_applies_alias_for_known_type():
+    q = build_query({"type": "DGPO Outlet", "description": "double power"})
+    assert "receptacle" in q  # alias sharpener appended
 
 
-def test_parse_offers_handles_key_variants():
-    data = {
-        "shopping": [
-            {"title": "Leviton Outlet", "price": "$4.25", "source": "Home Depot", "link": "https://hd"},
-            {"title": "Other", "extracted_price": 3.99, "seller": "Lowe's"},
-            {"title": "No price here"},  # dropped
-        ]
-    }
+def test_query_falls_back_to_type_without_description():
+    assert build_query({"type": "TV Antenna"}) == "TV Antenna tv antenna coax wall outlet"
+
+
+# --- offer parsing: nothing filtered, sorted cheapest-first ------------------
+def test_parse_keeps_all_priced_offers_sorted():
+    data = {"shopping": [
+        {"title": "A", "price": "$9.00", "shop": "HD", "link": "x"},
+        {"title": "B", "price": "$2.00", "shop": "Lowe's"},
+        {"title": "C", "price": "$0.01", "shop": "Junk"},   # NOT filtered — kept
+        {"title": "No price"},                               # only dropped: unpriceable
+    ]}
     offers = parse_offers(data)
-    assert len(offers) == 2
-    assert {o.supplier for o in offers} == {"Home Depot", "Lowe's"}
+    assert [o.price for o in offers] == [0.01, 2.00, 9.00]   # all kept, cheapest-first
 
 
-def test_parse_offers_empty_on_garbage():
+def test_parse_empty_on_garbage():
     assert parse_offers({"unexpected": "shape"}) == []
 
 
-# --- embed round-trip --------------------------------------------------------
-def test_render_literal_is_valid_python():
-    pb = {"switch": {"label": "Switch", "unit_price": 2.67, "sku": "X",
-                     "supplier": "Home Depot", "source_url": "https://hd", "unit": "each"}}
-    literal = render_literal(pb, indent="")
-    ns: dict = {}
-    exec(literal, ns)  # noqa: S102 - generated code under test
-    assert ns["EMBEDDED_PRICEBOOK"]["switch"]["unit_price"] == 2.67
+# --- fallback ----------------------------------------------------------------
+@pytest.mark.parametrize("query,expected", [
+    ("a gfci outlet", 16.0), ("single pole switch", 3.0), ("cat6 rj45 jack", 4.0),
+    ("mystery thing", 5.0),
+])
+def test_fallback_unit_price(query, expected):
+    assert fallback_unit_price(query) == expected
 
 
-def test_inject_is_idempotent(tmp_path):
-    f = tmp_path / "w.py"
-    f.write_text("a = 1\n    # >>> PRICEBOOK_START\n    old = {}\n    # <<< PRICEBOOK_END\nb = 2\n")
-    literal = render_literal({"switch": {"label": "Switch", "unit_price": 2.67, "sku": "X",
-                                         "supplier": "HD", "source_url": "", "unit": "each"}})
-    inject(f, literal)
-    once = f.read_text()
-    inject(f, literal)
-    assert f.read_text() == once
-    assert "a = 1" in once and "b = 2" in once  # surrounding code preserved
+# --- price_line_items (scrape monkeypatched) ---------------------------------
+def _fake_scrape(query, *, dump_raw=False):
+    return [Offer("Cheap Co", 2.0, "u1", True, "t1"), Offer("Mid Co", 5.0, "u2", True, "t2")]
 
 
-# --- cached catalog sanity ---------------------------------------------------
-def test_cached_catalog_is_complete_and_priced():
-    catalog = load_catalog()
-    assert set(catalog["items"]) == {s.type for s in SKU_SPECS}
-    for item in catalog["items"].values():
-        assert item["selected"]["price"] > 0
-        assert item["sku"]
+def test_prices_line_with_all_offers_and_cheapest_headline(monkeypatch):
+    monkeypatch.setattr(pricing_mod, "scrape_query", _fake_scrape)
+    priced = price_line_items(
+        [{"type": "DGPO Outlet", "count": 107, "description": "double power outlet"}],
+        use_cache=False,
+    )
+    line = priced[0]
+    assert line["unit_price"] == 2.0          # cheapest as headline
+    assert line["supplier"] == "Cheap Co"
+    assert line["total"] == round(2.0 * 107, 2)
+    assert line["offer_count"] == 2
+    assert len(line["offers"]) == 2           # every offer attached
 
 
-def test_build_catalog_does_not_clobber_when_scrape_returns_no_offers(monkeypatch, tmp_path):
-    catalog_path = tmp_path / "catalog.json"
-    catalog_path.write_text('{"existing": true}\n')
+def test_falls_back_when_no_offers(monkeypatch):
+    monkeypatch.setattr(pricing_mod, "scrape_query", lambda q, **k: [])
+    line = price_line_items([{"type": "GFCI", "count": 3, "description": "gfci outlet"}],
+                            use_cache=False)[0]
+    assert line["source"] == "fallback"
+    assert line["unit_price"] == 16.0         # keyword fallback
+    assert line["total"] == 48.0
 
-    monkeypatch.setattr(build_catalog, "CATALOG_PATH", catalog_path)
-    monkeypatch.setattr(build_catalog, "_credentials", lambda: ("token", "zone"))
-    monkeypatch.setattr(build_catalog, "scrape_all", lambda: {s.type: [] for s in SKU_SPECS})
 
-    with pytest.raises(SystemExit, match="no offers"):
-        build_catalog.main()
+def test_cache_dedupes_identical_queries(monkeypatch, tmp_path):
+    calls = []
 
-    assert json.loads(catalog_path.read_text()) == {"existing": True}
+    def counting_scrape(query, *, dump_raw=False):
+        calls.append(query)
+        return [Offer("S", 1.0)]
+
+    monkeypatch.setattr(pricing_mod, "scrape_query", counting_scrape)
+    cache = PriceCache(tmp_path / "c.json")
+    items = [
+        {"type": "Voice Outlet", "count": 48, "description": "CAT 6 cabling with RJ45 jack"},
+        {"type": "Voice Fax Outlet", "count": 1, "description": "CAT 6 cabling with RJ45 jack"},
+    ]
+    price_line_items(items, cache=cache)
+    assert len(calls) == 1                     # same query scraped once, second hit cache
+
+
+def test_cache_persists_to_disk(monkeypatch, tmp_path):
+    monkeypatch.setattr(pricing_mod, "scrape_query", _fake_scrape)
+    path = tmp_path / "c.json"
+    price_line_items([{"type": "X", "description": "thing"}], cache=PriceCache(path))
+    assert path.exists()
+    reloaded = json.loads(path.read_text())
+    assert any(len(v) == 2 for v in reloaded.values())   # offers persisted
+
+
+# --- warm cache sanity -------------------------------------------------------
+def test_committed_cache_loads():
+    cache = PriceCache()  # pricing/price_cache.json
+    # Should load without error; may be empty in a fresh checkout but must be valid JSON.
+    assert isinstance(cache._data, dict)

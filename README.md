@@ -56,21 +56,18 @@ async def analyze_drawing(payload: dict) -> dict:
 ```json
 {
   "detections":   [ { "type": "duplex_outlet", "label": "Duplex Outlet", "x": 420, "y": 310, "w": 24, "h": 24, "confidence": 0.91 } ],
-  "priced_items": [ { "type": "duplex_outlet", "label": "Duplex Outlet", "quantity": 42, "unit_price": 2.98, "total": 125.16,
-                      "sku": "Leviton CBR15-W", "supplier": "The Home Depot", "source_url": "https://www.homedepot.com/p/202066707",
-                      "boxes": [[420,310,24,24], ...] } ],
+  "priced_items": [ { "type": "DGPO Outlet", "label": "DGPO Outlet", "count": 107,
+                      "unit_price": 0.67, "total": 71.69, "supplier": "Menards", "source_url": "https://…",
+                      "offer_count": 40, "offers": [ { "supplier": "Menards", "price": 0.67, "url": "…" }, … ] } ],
   "proposal": "FlashPod Electrical Proposal ..."
 }
 ```
-The frontend highlights `priced_items[].boxes` when a proposal line is clicked. `unit_price`
-is a real, sourced price (`sku` + `supplier` + `source_url`) — see **Pricing** below.
+`unit_price` defaults to the cheapest of `offers` (nothing filtered); the frontend can render the
+full `offers` list as a compare/expand UI and let the user re-pick — see **Pricing** below.
 
-Optionally the frontend can send `"pricebook": { ... }` in the request to override prices per
-run; otherwise the worker uses its embedded catalog snapshot.
-
-> **Note:** template matching needs symbol templates. The MVP accepts them as an optional
-> `templates` array (legend crops sent by the frontend). Production replaces this with a trained
-> detector that needs no templates.
+> **Detection** is a vision LLM (Qwen-VL / Claude vision on Runpod) that emits the priced line
+> items as `{type, count, description}` — variable per drawing. The `description` is what pricing
+> searches on, so any symbol type prices automatically.
 
 ## Run it
 
@@ -85,37 +82,35 @@ uv run flash undeploy --all --force      # tear down workers when done (stop bil
 Auth: put `RUNPOD_API_KEY` in `.env` (see `.env.example`). On Windows, `PYTHONUTF8=1` avoids a
 CLI console-encoding crash.
 
-## Pricing — Bright Data (real, sourced, cached)
+## Pricing — Bright Data (dynamic, per line item)
 
-The `unit_price` on every line item is a real price, not a guess. The [`pricing/`](pricing/)
-package maps each detected symbol to a concrete product and pulls live multi-supplier prices
-via **Bright Data's SERP API → Google Shopping** (`udm=28`, one request returns offers from
-Home Depot, Lowe's, Grainger, Walmart, …). It picks the cheapest in-stock offer and caches the
-result so the demo never scrapes in the request path.
+The vision LLM emits variable line items per drawing — `{type, count, description}` — so there's
+no fixed catalog. The [`pricing/`](pricing/) package turns each line's **description** into a
+**Bright Data SERP → Google Shopping** query (`udm=28`, one request = offers from many suppliers),
+keeps **every** offer (nothing filtered), defaults the headline `unit_price` to the cheapest, and
+multiplies by `count`. The full `offers` list rides along for the compare UI.
 
 ```text
-symbol type ──symbol_sku──▶ product + search query
-                                   │  Bright Data SERP (Google Shopping)
-                                   ▼
-                       multi-supplier offers ──select cheapest──▶ catalog.json (cached)
-                                                                        │ embed_pricebook
-                                                                        ▼
-                                                   EMBEDDED_PRICEBOOK in takeoff_worker.py
+{type, count, description}  ──build_query (description)──▶  Bright Data SERP (Google Shopping, US)
+                                                                     │  ~40 supplier offers
+                                                                     ▼
+   priced line { unit_price=cheapest, total=unit×count, offers:[…all…] }  ◀── keep everything
 ```
 
 ```bash
-uv run python scripts/check_brightdata.py     # validate BRIGHTDATA_API_KEY + zone (~$0.002)
-uv run python -m pricing.build_catalog        # scrape live prices -> pricing/catalog.json
-uv run python -m pricing.embed_pricebook      # bake catalog prices into the worker
-uv run --extra dev pytest                     # pricing unit tests (no network)
+uv run python scripts/check_brightdata.py                 # validate BRIGHTDATA_API_KEY + zone
+uv run python -m pricing.price_takeoff                    # price data/sample_takeoff.json (live+cache)
+uv run python -m pricing.price_takeoff --no-cache         # force a fresh scrape
+uv run --extra dev pytest                                 # pricing unit tests (no network)
 ```
 
-Without a key the committed [`pricing/catalog.json`](pricing/catalog.json) (seeded with
-researched prices) drives the demo. Set `BRIGHTDATA_API_KEY` (+ `BRIGHTDATA_SERP_ZONE`) in
-`.env`, then `build_catalog` → `embed_pricebook` to swap in live prices. Cost is ~$1.50/1k
-requests, so a full 6-SKU refresh is under a cent. Why cached, not live-per-request: Flash
-ships only the function body (can't read a file on the worker), and a live scrape mid-pitch
-adds latency + rate-limit risk — so prices are baked at deploy and overridable via payload.
+**Where it runs:** pricing is **step 04 inside the Flash worker** — drop
+[`pricing/worker_step.py`](pricing/worker_step.py)'s `price_line_items_inline` into
+`analyze_drawing` after the vision LLM produces `line_items` (it's self-contained because Flash
+ships only the function body). Set `BRIGHTDATA_API_KEY` (+ `BRIGHTDATA_SERP_ZONE`) as worker
+secrets. Demo-safety: a query-keyed cache ([`pricing/price_cache.json`](pricing/price_cache.json))
+makes warm runs instant and survives a flaky network; a tiny keyword fallback covers an empty
+scrape. Cost ~$1.50/1k requests — a whole takeoff is well under a cent.
 
 ## Production (future, not built today)
 
@@ -130,11 +125,11 @@ Split into focused endpoints; move detection to GPU:
 
 ## Files
 - [`takeoff_worker.py`](takeoff_worker.py) — the single CPU endpoint (full pipeline)
-- [`pricing/`](pricing/) — Bright Data scraper + symbol→SKU mapping + cached catalog
-  - `symbol_sku.py` — symbol type → product + Google Shopping query
-  - `scraper.py` — Bright Data SERP client (multi-supplier offers)
-  - `catalog.py` — offer selection + `catalog.json` + worker pricebook
-  - `build_catalog.py` / `embed_pricebook.py` — refresh cache / bake into worker
+- [`pricing/`](pricing/) — Bright Data dynamic pricing (per line item, no fixed catalog)
+  - `scraper.py` — Bright Data SERP client; one query → all supplier offers
+  - `pricing.py` — query builder + `price_line_items()` + file cache + fallback
+  - `price_takeoff.py` — CLI to price a takeoff table (`data/sample_takeoff.json`)
+  - `worker_step.py` — self-contained step-04 to inline into the Flash worker
 - [`load_test.py`](load_test.py) — autoscaling/load demo against the endpoint
 - [`scripts/check_account.py`](scripts/check_account.py) — validate Runpod API key + balance
 - [`scripts/check_brightdata.py`](scripts/check_brightdata.py) — validate Bright Data key + zone

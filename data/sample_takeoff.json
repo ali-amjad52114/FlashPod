@@ -1,0 +1,8 @@
+[
+  { "type": "Data Outlet",        "count": 95,  "description": "CAT 6 cabling with RJ45 jack" },
+  { "type": "DGPO Outlet",        "count": 107, "description": "General double power outlet" },
+  { "type": "DGPO Outlet 20Amp",  "count": 2,   "description": "20 Amp power with isolated switch and separate circuit" },
+  { "type": "TV Antenna",         "count": 3,   "description": "Free-to-air aerial feed" },
+  { "type": "Voice Fax Outlet",   "count": 1,   "description": "CAT 6 cabling with RJ45 jack" },
+  { "type": "Voice Outlet",       "count": 48,  "description": "CAT 6 cabling with RJ45 jack" }
+]
