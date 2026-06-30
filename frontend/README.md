@@ -17,20 +17,20 @@ npm install
 npm run dev                 # http://localhost:5173
 ```
 
-## Flow (aligned to the backend contract)
+## Flow — 3 pages (`Project → Review → Proposal`)
 
-`Upload → Symbols → Run → Results`
-
-1. **Upload** — `POST /projects` then `POST /projects/{id}/drawings` (multipart; no base64 in the UI).
-2. **Symbols** — draw a box on the drawing to crop each symbol; each crop is uploaded via
-   `POST /projects/{id}/templates` (multipart `sym_type,label,threshold,file`).
-3. **Run** — `POST /projects/{id}/takeoff {drawing_id}`. This **blocks** until the worker finishes +
-   Bright Data overlay (cold start ~30–120 s); the UI shows an honest "warming up" state. No job
-   polling (the backend takeoff is synchronous).
-4. **Results** — `TakeoffOut` drives everything: SVG box overlays from `detections` (scaled via
-   `viewBox`), a line-item table from `priced_items` (with `price_source` provenance + live-price
-   links), and the proposal. Click a line item → highlight that type on the drawing (and back).
-   Manual edits call `PATCH /takeoffs/{id}/items/{sym_type}` (`price_source: "manual"`).
+1. **Project / Upload** — start a takeoff (`POST /projects` + `POST /projects/{id}/drawings`,
+   multipart) or **Use mock drawing** (a client-side synthetic drawing + detections, so the app is
+   demoable with no live worker). Existing proposals show as cards (from the local job index).
+   Symbol-example cropping is a **compact modal** (`POST /projects/{id}/templates`), not a page.
+2. **Detect & Review** — `POST /projects/{id}/takeoff {drawing_id}` (blocks; honest "warming up"
+   state, no faked per-stage progress). Then a **Detection Inspector**: click boxes, retype, exclude
+   false positives, restore, add missed devices (draw a box), and adjust unit prices. Edits live in
+   a local **review model** derived from `detections` + `priced_items`; price confirms call
+   `PATCH /takeoffs/{id}/items/{sym_type}`.
+3. **Quantity Takeoff & Proposal** — clean table + proposal sections (Scope, Quantity Takeoff,
+   Material Pricing, Assumptions, Exclusions, Estimated Total) with material subtotal + contingency.
+   Export **PDF / CSV / JSON**. Traceability everywhere: click a row/Trace → highlight that type.
 
 ## Notes / honest scope
 - **Money is backend-owned.** The UI sums backend line `total`s for the material subtotal and shows
