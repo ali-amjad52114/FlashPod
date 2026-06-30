@@ -95,6 +95,69 @@ async def analyze_drawing(payload: dict) -> dict:
             order = order[1:][iou < iou_thresh]
         return keep
 
+    # --- Bright Data live pricing (Phase 7) --------------------------------------
+    # Query Google Shopping per line item (description when the vision LLM provides one,
+    # else the type label). Returns EVERY offer cheapest-first (nothing filtered) so the
+    # frontend can show a compare list; on any failure / missing key we return [] and the
+    # caller falls back to PRICE_MAP (price_source="static"). All imports live here per
+    # SKILL Gotcha #1; needs BRIGHTDATA_API_KEY (+ BRIGHTDATA_SERP_ZONE) as worker secrets.
+    import os
+    import re as _re
+    from urllib.parse import quote_plus
+
+    import requests
+
+    _BD_TOKEN = os.environ.get("BRIGHTDATA_API_KEY")
+    _BD_ZONE = os.environ.get("BRIGHTDATA_SERP_ZONE", "serp_api1")
+    _BD_RESULT_KEYS = ("shopping", "shopping_results", "products", "organic", "results")
+    _bd_cache: dict = {}   # per-request memo: query -> offers (dedupes repeated types)
+
+    def _bd_to_price(value):
+        if isinstance(value, (int, float)):
+            return round(float(value), 2)
+        if not isinstance(value, str):
+            return None
+        m = _re.search(r"\d[\d,]*\.?\d*", value.replace(",", ""))
+        return round(float(m.group()), 2) if m else None
+
+    def bright_data_offers(query: str) -> list:
+        """All Google Shopping offers for `query`, cheapest-first. [] if unavailable."""
+        if not _BD_TOKEN or not query:
+            return []
+        if query in _bd_cache:
+            return _bd_cache[query]
+        offers = []
+        try:
+            url = ("https://www.google.com/search?q=" + quote_plus(query)
+                   + "&udm=28&brd_json=1&gl=us&hl=en")
+            resp = requests.post(
+                "https://api.brightdata.com/request",
+                headers={"Authorization": "Bearer " + _BD_TOKEN,
+                         "Content-Type": "application/json"},
+                json={"zone": _BD_ZONE, "url": url, "format": "raw"},
+                timeout=45,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = next((data[k] for k in _BD_RESULT_KEYS if isinstance(data.get(k), list)), [])
+            for it in results:
+                if not isinstance(it, dict):
+                    continue
+                price = _bd_to_price(it.get("price") or it.get("extracted_price"))
+                if not price or price <= 0:
+                    continue
+                offers.append({
+                    "supplier": str(it.get("shop") or it.get("source") or it.get("title") or "Unknown").strip(),
+                    "price": price,
+                    "url": str(it.get("link") or ""),
+                    "title": str(it.get("title") or ""),
+                })
+            offers.sort(key=lambda o: o["price"])
+        except Exception:
+            offers = []   # demo-safe: fall back to PRICE_MAP rather than fail the request
+        _bd_cache[query] = offers
+        return offers
+
     # --- 1. validate + decode ---
     project_name = payload.get("project_name", "Electrical Takeoff")
     image_b64 = payload.get("image_base64")
@@ -153,19 +216,37 @@ async def analyze_drawing(payload: dict) -> dict:
         for sym_type in types_in_order:
             group = [d for d in detections if d["type"] == sym_type]
             qty = len(group)
-            unit = float(PRICE_MAP.get(sym_type, DEFAULT_UNIT_PRICE))
+            label = group[0]["label"]
+
+            # Phase 7: live Bright Data price (query by description if present, else label);
+            # cheapest offer is the headline, all offers ride along, fall back to PRICE_MAP.
+            query = group[0].get("description") or label
+            offers = bright_data_offers(query)
+            if offers:
+                best = offers[0]
+                unit = best["price"]
+                supplier, source_url = best["supplier"], best["url"]
+                price_source, pricing_asof = "brightdata", datetime.now().isoformat()
+            else:
+                unit = float(PRICE_MAP.get(sym_type, DEFAULT_UNIT_PRICE))
+                supplier, source_url = "", ""
+                price_source, pricing_asof = "static", None
+
             total = round(unit * qty, 2)
             material_subtotal += total
             priced_items.append(
                 {
                     "type": sym_type,
-                    "label": group[0]["label"],
+                    "label": label,
                     "quantity": qty,
                     "unit_price": unit,
                     "total": total,
                     "boxes": [[d["x"], d["y"], d["w"], d["h"]] for d in group],
-                    "price_source": "static",
-                    "pricing_asof": None,
+                    "price_source": price_source,
+                    "pricing_asof": pricing_asof,
+                    "supplier": supplier,        # cheapest supplier (Bright Data)
+                    "source_url": source_url,
+                    "offers": offers,            # every offer, nothing filtered (compare UI)
                 }
             )
 
