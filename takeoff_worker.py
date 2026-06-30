@@ -26,15 +26,19 @@ async def analyze_drawing(payload: dict) -> dict:
         image_base64: str                     - the drawing (PNG/JPG) as base64
         templates: list[dict] (optional)      - symbol crops to match, each:
             { "type": str, "label": str, "template_base64": str, "threshold": float? }
+        labor_pct: float (optional, default 35) - labor as a % of material subtotal
 
     Output:
         detections:   [{ type, label, x, y, w, h, confidence }]   - one per detected symbol
-        priced_items: [{ type, label, quantity, unit_price, total, boxes }]  - grouped + priced
+        priced_items: [{ type, label, quantity, unit_price, total, boxes,
+                         price_source, pricing_asof }]            - grouped + priced (+ provenance)
+        totals:       { material_subtotal, labor_pct, labor_total, grand_total }
         proposal:     str                                          - formatted proposal text
-        project_name, image_size
+        project_name, image_size, timestamp
 
-    The frontend uses priced_items[].boxes for the wow feature:
-    click a proposal line -> highlight every matching symbol on the drawing.
+    Note: when called over HTTP, Runpod nests this whole dict under `output`
+    (alongside a top-level job status). The frontend uses detections for the canvas
+    (they carry confidence) and priced_items[].boxes per type for the highlight feature.
     """
     import base64
     from datetime import datetime
@@ -95,6 +99,7 @@ async def analyze_drawing(payload: dict) -> dict:
     project_name = payload.get("project_name", "Electrical Takeoff")
     image_b64 = payload.get("image_base64")
     templates = payload.get("templates") or []
+    labor_pct = float(payload.get("labor_pct", 35.0))   # labor as % of material subtotal
     if not image_b64:
         return {"status": "error", "error": "Provide 'image_base64'."}
 
@@ -137,8 +142,10 @@ async def analyze_drawing(payload: dict) -> dict:
                 )
 
         # --- 3 + 4. count + price (group detections by type) ---
+        # price_source/pricing_asof are provenance fields: "static" today; Bright Data (Phase 7)
+        # sets them to "brightdata" + an as-of timestamp without changing this shape.
         priced_items = []
-        subtotal = 0.0
+        material_subtotal = 0.0
         types_in_order = []
         for d in detections:
             if d["type"] not in types_in_order:
@@ -148,7 +155,7 @@ async def analyze_drawing(payload: dict) -> dict:
             qty = len(group)
             unit = float(PRICE_MAP.get(sym_type, DEFAULT_UNIT_PRICE))
             total = round(unit * qty, 2)
-            subtotal += total
+            material_subtotal += total
             priced_items.append(
                 {
                     "type": sym_type,
@@ -157,8 +164,21 @@ async def analyze_drawing(payload: dict) -> dict:
                     "unit_price": unit,
                     "total": total,
                     "boxes": [[d["x"], d["y"], d["w"], d["h"]] for d in group],
+                    "price_source": "static",
+                    "pricing_asof": None,
                 }
             )
+
+        # totals (backend is the single pricing authority; labor = % of material subtotal)
+        material_subtotal = round(material_subtotal, 2)
+        labor_total = round(material_subtotal * labor_pct / 100.0, 2)
+        grand_total = round(material_subtotal + labor_total, 2)
+        totals = {
+            "material_subtotal": material_subtotal,
+            "labor_pct": labor_pct,
+            "labor_total": labor_total,
+            "grand_total": grand_total,
+        }
 
         # --- 5. proposal ---
         lines = [f"FlashPod Electrical Proposal — {project_name}",
@@ -168,7 +188,9 @@ async def analyze_drawing(payload: dict) -> dict:
         for it in priced_items:
             lines.append(f"{it['label']:<20}{it['quantity']:>6}{it['unit_price']:>12.2f}{it['total']:>14.2f}")
         lines.append("-" * 52)
-        lines.append(f"{'SUBTOTAL':<38}{round(subtotal, 2):>14.2f}")
+        lines.append(f"{'MATERIAL SUBTOTAL':<38}{material_subtotal:>14.2f}")
+        lines.append(f"{f'LABOR ({labor_pct:.0f}%)':<38}{labor_total:>14.2f}")
+        lines.append(f"{'GRAND TOTAL':<38}{grand_total:>14.2f}")
 
         # --- 6. return JSON ---
         return {
@@ -176,6 +198,7 @@ async def analyze_drawing(payload: dict) -> dict:
             "project_name": project_name,
             "detections": detections,
             "priced_items": priced_items,
+            "totals": totals,
             "proposal": "\n".join(lines),
             "image_size": {"width": int(drawing.shape[1]), "height": int(drawing.shape[0])},
             "timestamp": datetime.now().isoformat(),

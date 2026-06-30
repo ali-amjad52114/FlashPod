@@ -32,33 +32,49 @@ endpoint (no GPU, no trained model).
 
 ## NON-NEGOTIABLE technical facts the produced prompt MUST state verbatim
 
-### Exact API contract (must match the worker)
+### Exact API contract (must match `takeoff_worker.py`)
 Request payload (the user data):
 ```json
 { "project_name": "Office Electrical Takeoff",
   "image_base64": "<drawing PNG/JPG as base64>",
-  "templates": [ { "type": "duplex_outlet", "label": "Duplex Outlet", "template_base64": "<crop>", "threshold": 0.7 } ] }
+  "templates": [ { "type": "duplex_outlet", "label": "Duplex Outlet", "template_base64": "<crop>", "threshold": 0.7 } ],
+  "labor_pct": 35 }
 ```
-Response:
+Worker result (the dict the handler returns — see envelope note for where it lands):
 ```json
 { "status": "success",
+  "project_name": "Office Electrical Takeoff",
+  "image_size": { "width": 1654, "height": 1169 },
   "detections":   [ { "type": "duplex_outlet", "label": "Duplex Outlet", "x": 420, "y": 310, "w": 24, "h": 24, "confidence": 0.91 } ],
-  "priced_items": [ { "type": "duplex_outlet", "label": "Duplex Outlet", "quantity": 42, "unit_price": 4.25, "total": 178.50, "boxes": [[420,310,24,24]] } ],
+  "priced_items": [ { "type": "duplex_outlet", "label": "Duplex Outlet", "quantity": 42, "unit_price": 4.25, "total": 178.50,
+                      "boxes": [[420,310,24,24]], "price_source": "static", "pricing_asof": null } ],
+  "totals": { "material_subtotal": 178.50, "labor_pct": 35, "labor_total": 62.48, "grand_total": 240.98 },
   "proposal": "FlashPod Electrical Proposal ...",
-  "image_size": { "width": 1654, "height": 1169 } }
+  "timestamp": "..." }
 ```
-Boxes are `[x, y, w, h]` in **original image pixels**; the UI must scale them to the displayed image.
+- Boxes are `[x, y, w, h]` in **original image pixels**; the UI scales them to the displayed image.
+- Render overlays from `detections` (they carry `confidence`); use `priced_items` for the table +
+  per-type grouping; join by `type`.
+- **All money is backend-owned** (`unit_price`, `total`, `totals`). A UI labor-% control may recompute
+  `labor_total`/`grand_total` locally from `material_subtotal` (formula only) — never material prices.
+- **Provenance:** `price_source` ("static"|"brightdata") + `pricing_asof` let the UI/PDF show the
+  pricing source once Bright Data (Phase 7) is wired; null until then.
 
 ### How the UI calls Flash (queue-based endpoint, after `flash deploy`)
-- **Async (use this for cold starts):** `POST https://api.runpod.ai/v2/{ENDPOINT_ID}/run`, then poll
-  `GET https://api.runpod.ai/v2/{ENDPOINT_ID}/status/{JOB_ID}` until terminal.
+- **Async (use this for cold starts):** `POST https://api.runpod.ai/v2/{ENDPOINT_ID}/run` → `{ "id", "status": "IN_QUEUE" }`,
+  then poll `GET https://api.runpod.ai/v2/{ENDPOINT_ID}/status/{JOB_ID}`.
 - **Sync (≤60s only):** `POST https://api.runpod.ai/v2/{ENDPOINT_ID}/runsync`.
 - Header: `Authorization: Bearer <RUNPOD_API_KEY>`, `Content-Type: application/json`.
-- **Body MUST be wrapped:** `{"input": { project_name, image_base64, templates } }` — the worker's
-  `payload` arg is the value of `input`.
-- Job states: `IN_QUEUE`, `IN_PROGRESS`, `COMPLETED`, `FAILED`, `CANCELLED`. `runsync` times out at
-  60s; cold starts can exceed it, so prefer `/run` + status polling and show a "warming up" state.
-- Local dev route (for testing before deploy): `POST http://localhost:8888/takeoff_worker/runsync`.
+- **Body MUST be wrapped:** `{"input": { project_name, image_base64, templates, labor_pct } }` — the
+  worker's `payload` arg is the value of `input`.
+- **ENVELOPE (critical):** Runpod nests the worker result under `output`, alongside a top-level job
+  `status`: `{ "status": "COMPLETED|IN_PROGRESS|FAILED", "output": <worker result>, "error": "<on FAILED>" }`.
+  The proxy unwraps `output`; the UI uses the top-level job `status` for the progress lifecycle and the
+  nested `output.status` ("success"/"error") for app errors — they are different fields. (Local reference
+  doesn't quote the raw envelope; cite Runpod Serverless API docs for exact shapes.)
+- Job states: `IN_QUEUE`, `IN_PROGRESS`, `COMPLETED`, `FAILED`, `CANCELLED`. `runsync` times out at 60s;
+  cold starts can exceed it, so prefer `/run` + status polling and show a "warming up" state.
+- Local dev route: `POST http://localhost:8888/takeoff_worker/runsync` (also `{"input": ...}`; result also under `output`).
 
 ### SECURITY — mandatory
 The `RUNPOD_API_KEY` must **never** ship in browser code. The produced prompt must require a **thin
