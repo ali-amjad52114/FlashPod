@@ -27,14 +27,12 @@ TIMEOUT: float = float(os.getenv("RUNPOD_TIMEOUT", "120"))
 async def call_analyze_drawing(
     project_name: str,
     image_path: Path,
-    templates: list[dict],
 ) -> dict:
     """Build the Runpod payload and POST to the analyze_drawing endpoint.
 
     Args:
         project_name: project label forwarded to the worker.
         image_path: local path to the drawing file.
-        templates: list of dicts with keys sym_type, label, filepath, threshold.
 
     Returns:
         The JSON response from the worker:
@@ -46,22 +44,9 @@ async def call_analyze_drawing(
     """
     image_b64 = base64.b64encode(image_path.read_bytes()).decode()
 
-    template_payloads = []
-    for t in templates:
-        tpl_b64 = base64.b64encode(Path(t["filepath"]).read_bytes()).decode()
-        template_payloads.append(
-            {
-                "type": t["sym_type"],
-                "label": t["label"],
-                "template_base64": tpl_b64,
-                "threshold": float(t.get("threshold", 0.7)),
-            }
-        )
-
     payload = {
         "project_name": project_name,
         "image_base64": image_b64,
-        "templates": template_payloads,
     }
 
     headers: dict[str, str] = {}
