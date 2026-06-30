@@ -68,6 +68,7 @@ export interface SymbolCandidate {
   bbox: [number, number, number, number]; // [x, y, w, h]
   glyph_base64: string;
   label_base64: string;
+  suggested_label: string; // OCR'd legend label, snapped to a canonical symbol name
 }
 export interface AutoSymbolsResult {
   candidates: SymbolCandidate[];

@@ -64,11 +64,13 @@ async def analyze_drawing(payload: dict) -> dict:
     # Static fallback price table — used when Bright Data is unset/unreachable
     # so the demo never breaks (see architecture diagram, "Static Fallback").
     PRICE_TABLE = {
-        "duplex_outlet": 4.25,
-        "gfci_outlet": 18.75,
-        "data_drop": 12.00,
-        "switch": 3.25,
-        "light": 45.00,
+        "duplex_receptacle": 6.50,
+        "gfci_receptacle": 19.00,
+        "data_outlet": 12.00,
+        "tv_outlet": 8.00,
+        "switch": 8.00,
+        "light": 35.00,
+        "smoke_detector": 18.00,
         "panel": 320.00,
     }
     LABELS = {
@@ -164,6 +166,7 @@ async def analyze_drawing(payload: dict) -> dict:
     # SKILL Gotcha #1; needs BRIGHTDATA_API_KEY (+ BRIGHTDATA_SERP_ZONE) as worker secrets.
     import os
     import re as _re
+    import time
     from urllib.parse import quote_plus
 
     import requests
@@ -182,40 +185,54 @@ async def analyze_drawing(payload: dict) -> dict:
         return round(float(m.group()), 2) if m else None
 
     def bright_data_offers(query: str) -> list:
-        """All Google Shopping offers for `query`, cheapest-first. [] if unavailable."""
+        """All Google Shopping offers for `query`, cheapest-first. [] if unavailable.
+
+        SERP scrapes are occasionally flaky, so retry up to 3x with backoff before
+        giving up; log every failure (visible in the `flash dev` console) instead of
+        swallowing it silently.
+        """
         if not _BD_TOKEN or not query:
             return []
         if query in _bd_cache:
             return _bd_cache[query]
+        url = ("https://www.google.com/search?q=" + quote_plus(query)
+               + "&udm=28&brd_json=1&gl=us&hl=en")
         offers = []
-        try:
-            url = ("https://www.google.com/search?q=" + quote_plus(query)
-                   + "&udm=28&brd_json=1&gl=us&hl=en")
-            resp = requests.post(
-                "https://api.brightdata.com/request",
-                headers={"Authorization": "Bearer " + _BD_TOKEN,
-                         "Content-Type": "application/json"},
-                json={"zone": _BD_ZONE, "url": url, "format": "raw"},
-                timeout=45,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            results = next((data[k] for k in _BD_RESULT_KEYS if isinstance(data.get(k), list)), [])
-            for it in results:
-                if not isinstance(it, dict):
-                    continue
-                price = _bd_to_price(it.get("price") or it.get("extracted_price"))
-                if not price or price <= 0:
-                    continue
-                offers.append({
-                    "supplier": str(it.get("shop") or it.get("source") or it.get("title") or "Unknown").strip(),
-                    "price": price,
-                    "url": str(it.get("link") or ""),
-                    "title": str(it.get("title") or ""),
-                })
-            offers.sort(key=lambda o: o["price"])
-        except Exception:
-            offers = []   # demo-safe: fall back to PRICE_MAP rather than fail the request
+        for attempt in range(1, 4):     # up to 3 tries
+            try:
+                resp = requests.post(
+                    "https://api.brightdata.com/request",
+                    headers={"Authorization": "Bearer " + _BD_TOKEN,
+                             "Content-Type": "application/json"},
+                    json={"zone": _BD_ZONE, "url": url, "format": "raw"},
+                    timeout=45,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                results = next((data[k] for k in _BD_RESULT_KEYS if isinstance(data.get(k), list)), [])
+                for it in results:
+                    if not isinstance(it, dict):
+                        continue
+                    price = _bd_to_price(it.get("price") or it.get("extracted_price"))
+                    if not price or price <= 0:
+                        continue
+                    offers.append({
+                        "supplier": str(it.get("shop") or it.get("source") or it.get("title") or "Unknown").strip(),
+                        "price": price,
+                        "url": str(it.get("link") or ""),
+                        "title": str(it.get("title") or ""),
+                    })
+                offers.sort(key=lambda o: o["price"])
+                if offers:
+                    break               # success
+                print(f"[brightdata] no priced offers for {query!r} (attempt {attempt}/3)", flush=True)
+            except Exception as e:
+                print(f"[brightdata] attempt {attempt}/3 FAILED for {query!r}: "
+                      f"{type(e).__name__}: {e}", flush=True)
+            if attempt < 3:
+                time.sleep(1.5 * attempt)   # backoff before retry
+        if not offers:
+            print(f"[brightdata] giving up on {query!r} -> static fallback", flush=True)
         _bd_cache[query] = offers
         return offers
 

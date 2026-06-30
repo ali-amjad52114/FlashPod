@@ -9,3 +9,7 @@ aiofiles>=23.2.1
 opencv-python-headless>=4.9.0
 numpy>=1.26.0
 pillow>=10.0.0
+# OCR for auto-filling symbol names. Needs the tesseract binary on the host:
+#   macOS: brew install tesseract   |   Debian/Ubuntu: apt-get install tesseract-ocr
+# (best-effort — if tesseract is missing, names just come back blank)
+pytesseract>=0.3.10

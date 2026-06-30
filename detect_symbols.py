@@ -113,65 +113,91 @@ async def detect_symbols(payload: dict) -> dict:
     try:
         img = Image.open(BytesIO(base64.b64decode(image_b64))).convert("RGB")
         W0, H0 = img.size
-
-        # --- resize to a controlled, 28-divisible size; remember scale to map boxes back ---
-        max_long = int(payload.get("max_long_side", 1568))
-        scale = min(1.0, max_long / max(W0, H0))
-        Wr = max(28, round(W0 * scale / 28) * 28)
-        Hr = max(28, round(H0 * scale / 28) * 28)
-        img_r = img.resize((Wr, Hr), Image.LANCZOS)
-        sx, sy = W0 / Wr, H0 / Hr   # resized-space -> original-space
-
-        # --- 2. detect symbols (Qwen2.5-VL grounding) ---
         catalog_txt = "\n".join(f"- {s['type']}: {s['desc']}" for s in catalog)
-        prompt = (
-            f"This is an electrical floor plan, {Wr}x{Hr} pixels. "
-            "Find EVERY electrical symbol on the plan (not the legend or schedule table). "
-            f"Symbol types to detect:\n{catalog_txt}\n\n"
-            "Return ONLY a JSON array, no prose. Each element must be exactly: "
-            '{"type": "<one type key above>", "bbox_2d": [x1, y1, x2, y2]} '
-            "with integer pixel coordinates. List every single occurrence."
-        )
-        messages = [{"role": "user", "content": [
-            {"type": "image", "image": img_r},
-            {"type": "text", "text": prompt},
-        ]}]
-        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        image_inputs, video_inputs = process_vision_info(messages)
-        inputs = processor(text=[text], images=image_inputs, videos=video_inputs,
-                           padding=True, return_tensors="pt").to(model.device)
-        with torch.no_grad():
-            gen = model.generate(**inputs, max_new_tokens=8192, do_sample=False)
-        trimmed = [o[len(i):] for i, o in zip(inputs.input_ids, gen)]
-        raw = processor.batch_decode(trimmed, skip_special_tokens=True,
-                                     clean_up_tokenization_spaces=False)[0]
+        max_long = int(payload.get("max_long_side", 1568))
 
-        # --- parse: salvage each {…} object independently, tolerating a truncated
-        # or malformed array tail (the VLM can emit 140+ items and run long, and a
-        # single bad entry must not drop the whole detection set). ---
-        rows = []
-        for obj in re.findall(r"\{[^{}]*\}", raw, re.DOTALL):
-            try:
-                rows.append(json.loads(obj))
-            except Exception:
-                continue
-        detections = []
-        for r in rows:
-            if not isinstance(r, dict):
-                continue
-            t = r.get("type") or r.get("label")
-            box = r.get("bbox_2d") or r.get("bbox")
-            if t not in valid_types or not box or len(box) != 4:
-                continue
-            x1, y1, x2, y2 = box
-            X1, Y1, X2, Y2 = sorted([x1, x2])[0] * sx, sorted([y1, y2])[0] * sy, \
-                sorted([x1, x2])[1] * sx, sorted([y1, y2])[1] * sy
-            detections.append({
-                "type": t, "label": labels[t],
-                "x": int(X1), "y": int(Y1),
-                "w": int(X2 - X1), "h": int(Y2 - Y1),
-                "confidence": 1.0,   # VLM gives no score; placeholder
-            })
+        def detect_in(region):
+            """Run the VLM on one image region; return dets in that region's px coords."""
+            rw0, rh0 = region.size
+            scl = min(1.0, max_long / max(rw0, rh0))
+            wr = max(28, round(rw0 * scl / 28) * 28)
+            hr = max(28, round(rh0 * scl / 28) * 28)
+            r_img = region.resize((wr, hr), Image.LANCZOS)
+            rsx, rsy = rw0 / wr, rh0 / hr
+            prompt = (
+                f"This is a section of an electrical floor plan, {wr}x{hr} pixels. "
+                "Find EVERY electrical symbol shown.\n"
+                f"Symbol types:\n{catalog_txt}\n\n"
+                "Return ONLY a JSON array, no prose. Each element exactly: "
+                '{"type": "<one type key above>", "bbox_2d": [x1, y1, x2, y2]} '
+                "in integer pixel coordinates. Return [] if there are none."
+            )
+            messages = [{"role": "user", "content": [
+                {"type": "image", "image": r_img}, {"type": "text", "text": prompt}]}]
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = processor(text=[text], images=image_inputs, videos=video_inputs,
+                               padding=True, return_tensors="pt").to(model.device)
+            with torch.no_grad():
+                gen = model.generate(**inputs, max_new_tokens=4096, do_sample=False)
+            trimmed = [o[len(i):] for i, o in zip(inputs.input_ids, gen)]
+            raw_txt = processor.batch_decode(trimmed, skip_special_tokens=True,
+                                             clean_up_tokenization_spaces=False)[0]
+            out = []
+            for obj in re.findall(r"\{[^{}]*\}", raw_txt, re.DOTALL):
+                try:
+                    rr = json.loads(obj)
+                except Exception:
+                    continue
+                if not isinstance(rr, dict):
+                    continue
+                t = rr.get("type") or rr.get("label")
+                box = rr.get("bbox_2d") or rr.get("bbox")
+                if t not in valid_types or not box or len(box) != 4:
+                    continue
+                x1, y1, x2, y2 = box
+                X1, Y1 = sorted([x1, x2])[0] * rsx, sorted([y1, y2])[0] * rsy
+                X2, Y2 = sorted([x1, x2])[1] * rsx, sorted([y1, y2])[1] * rsy
+                out.append({"type": t, "x": X1, "y": Y1, "w": X2 - X1, "h": Y2 - Y1})
+            return out
+
+        # --- 2. detect: optional tiling (tiles>1 splits the plan into a grid so the
+        # VLM sees fewer, larger symbols per call — the standard small-object trick). ---
+        tiles = max(1, int(payload.get("tiles", 1)))
+        raw_dets = []
+        if tiles == 1:
+            raw_dets = detect_in(img)
+        else:
+            ov, tw, th = 0.08, W0 / tiles, H0 / tiles
+            for ty in range(tiles):
+                for tx in range(tiles):
+                    ax, bx = max(0, int(tx*tw - ov*tw)), min(W0, int((tx+1)*tw + ov*tw))
+                    ay, by = max(0, int(ty*th - ov*th)), min(H0, int((ty+1)*th + ov*th))
+                    for d in detect_in(img.crop((ax, ay, bx, by))):
+                        d["x"] += ax; d["y"] += ay
+                        raw_dets.append(d)
+
+        # dedupe overlaps at tile seams — greedy IoU (no VLM scores, so keep first)
+        def _iou(a, b):
+            ix1, iy1 = max(a["x"], b["x"]), max(a["y"], b["y"])
+            ix2, iy2 = min(a["x"]+a["w"], b["x"]+b["w"]), min(a["y"]+a["h"], b["y"]+b["h"])
+            inter = max(0, ix2-ix1) * max(0, iy2-iy1)
+            ua = a["w"]*a["h"] + b["w"]*b["h"] - inter
+            return inter / ua if ua > 0 else 0.0
+
+        kept = []
+        for d in raw_dets:
+            if all(_iou(d, k) < 0.4 for k in kept):
+                kept.append(d)
+
+        detections = [{
+            "type": d["type"], "label": labels[d["type"]],
+            "x": int(d["x"]), "y": int(d["y"]), "w": int(d["w"]), "h": int(d["h"]),
+            "confidence": 1.0,
+        } for d in kept]
+        _emitted = {}
+        for d in raw_dets:
+            _emitted[d["type"]] = _emitted.get(d["type"], 0) + 1
 
         # --- 3 + 4. count + price (static PRICE_TABLE) ---
         priced_items = []
@@ -205,12 +231,18 @@ async def detect_symbols(payload: dict) -> dict:
         return {
             "status": "success",
             "project_name": project_name,
-            "detector": "qwen2.5-vl-7b",
+            "detector": MODEL_ID,
             "detections": detections,
             "priced_items": priced_items,
             "proposal": "\n".join(lines),
             "meta": {"image_width": W0, "image_height": H0, "total_symbols": len(detections)},
             "image_size": {"width": W0, "height": H0},
+            "debug": {
+                "tiles": tiles,
+                "raw_dets": len(raw_dets),   # detections across all tiles (pre-dedup)
+                "kept": len(kept),           # after cross-tile dedup
+                "emitted_types": _emitted,
+            },
             "timestamp": datetime.now().isoformat(),
         }
 
