@@ -3,6 +3,8 @@
 __pycache__/
 *.pyc
 .flash/
+pricing/.cache/
+data/priced_takeoff.json
 reference/
 .agents/
 .claude/
@@ -16,3 +18,7 @@ scripts/
 load_test.py
 uploads/
 *.db
+
+# Backend runtime artifacts (uploaded drawings/templates + local SQLite DB)
+backend/uploads/
+backend/*.db

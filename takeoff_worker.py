@@ -35,18 +35,21 @@ async def analyze_drawing(payload: dict) -> dict:
         image_base64: str                     - the drawing (PNG/JPG) as base64
         templates: list[dict] (optional)      - symbol crops to match, each:
             { "type": str, "label": str, "template_base64": str, "threshold": float? }
+        labor_pct: float (optional, default 35) - labor as a % of material subtotal
 
     Output:
         detections:   [{ type, label, x, y, w, h, confidence }]   - one per detected symbol
         priced_items: [{ type, label, quantity, unit, unit_price, total,
-                         price_source, vendor?, source_url?, boxes }]  - grouped + priced
+                         price_source, pricing_asof, supplier?, vendor?,
+                         source_url?, offers, boxes }]             - grouped + priced
+        totals:       { material_subtotal, labor_pct, labor_total, grand_total }
         proposal:     str                                          - formatted proposal text
         meta:         { image_width, image_height, total_symbols }
         project_name, image_size, timestamp
 
-    price_source is "brightdata" (live) or "static" (PRICE_TABLE fallback).
-    The frontend uses priced_items[].boxes for the wow feature:
-    click a proposal line -> highlight every matching symbol on the drawing.
+    Note: when called over HTTP, Runpod nests this whole dict under `output`
+    (alongside a top-level job status). The frontend uses detections for the canvas
+    (they carry confidence) and priced_items[].boxes per type for the highlight feature.
     """
     import base64
     from datetime import datetime
@@ -163,10 +166,74 @@ async def analyze_drawing(payload: dict) -> dict:
             order = order[1:][iou < iou_thresh]
         return keep
 
+    # --- Bright Data live pricing (Phase 7) --------------------------------------
+    # Query Google Shopping per line item (description when the vision LLM provides one,
+    # else the type label). Returns EVERY offer cheapest-first (nothing filtered) so the
+    # frontend can show a compare list; on any failure / missing key we return [] and the
+    # caller falls back to PRICE_MAP (price_source="static"). All imports live here per
+    # SKILL Gotcha #1; needs BRIGHTDATA_API_KEY (+ BRIGHTDATA_SERP_ZONE) as worker secrets.
+    import os
+    import re as _re
+    from urllib.parse import quote_plus
+
+    import requests
+
+    _BD_TOKEN = os.environ.get("BRIGHTDATA_API_KEY")
+    _BD_ZONE = os.environ.get("BRIGHTDATA_SERP_ZONE", "serp_api1")
+    _BD_RESULT_KEYS = ("shopping", "shopping_results", "products", "organic", "results")
+    _bd_cache: dict = {}   # per-request memo: query -> offers (dedupes repeated types)
+
+    def _bd_to_price(value):
+        if isinstance(value, (int, float)):
+            return round(float(value), 2)
+        if not isinstance(value, str):
+            return None
+        m = _re.search(r"\d[\d,]*\.?\d*", value.replace(",", ""))
+        return round(float(m.group()), 2) if m else None
+
+    def bright_data_offers(query: str) -> list:
+        """All Google Shopping offers for `query`, cheapest-first. [] if unavailable."""
+        if not _BD_TOKEN or not query:
+            return []
+        if query in _bd_cache:
+            return _bd_cache[query]
+        offers = []
+        try:
+            url = ("https://www.google.com/search?q=" + quote_plus(query)
+                   + "&udm=28&brd_json=1&gl=us&hl=en")
+            resp = requests.post(
+                "https://api.brightdata.com/request",
+                headers={"Authorization": "Bearer " + _BD_TOKEN,
+                         "Content-Type": "application/json"},
+                json={"zone": _BD_ZONE, "url": url, "format": "raw"},
+                timeout=45,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            results = next((data[k] for k in _BD_RESULT_KEYS if isinstance(data.get(k), list)), [])
+            for it in results:
+                if not isinstance(it, dict):
+                    continue
+                price = _bd_to_price(it.get("price") or it.get("extracted_price"))
+                if not price or price <= 0:
+                    continue
+                offers.append({
+                    "supplier": str(it.get("shop") or it.get("source") or it.get("title") or "Unknown").strip(),
+                    "price": price,
+                    "url": str(it.get("link") or ""),
+                    "title": str(it.get("title") or ""),
+                })
+            offers.sort(key=lambda o: o["price"])
+        except Exception:
+            offers = []   # demo-safe: fall back to PRICE_MAP rather than fail the request
+        _bd_cache[query] = offers
+        return offers
+
     # --- 1. validate + decode ---
     project_name = payload.get("project_name", "Electrical Takeoff")
     image_b64 = payload.get("image_base64")
     templates = payload.get("templates") or []
+    labor_pct = float(payload.get("labor_pct", 35.0))   # labor as % of material subtotal
     if not image_b64:
         return {"status": "error", "error": "Provide 'image_base64'."}
 
@@ -208,9 +275,11 @@ async def analyze_drawing(payload: dict) -> dict:
                     }
                 )
 
-        # --- 3. count (group detections by type) ---
+        # --- 3 + 4. count + price (group detections by type) ---
+        # price_source/pricing_asof are provenance fields. Bright Data can come
+        # from direct shopping offers or the pricing-service contract.
         priced_items = []
-        subtotal = 0.0
+        material_subtotal = 0.0
         types_in_order = []
         for d in detections:
             if d["type"] not in types_in_order:
@@ -221,30 +290,61 @@ async def analyze_drawing(payload: dict) -> dict:
         for sym_type in types_in_order:
             group = [d for d in detections if d["type"] == sym_type]
             qty = len(group)
-            quote = live.get(sym_type)
-            if quote:
+            label = group[0]["label"]
+
+            # Phase 7: live Bright Data price (query by description if present, else label);
+            # cheapest offer is the headline, all offers ride along. If direct offers are
+            # unavailable, use the pricing-service quote; then fall back to PRICE_TABLE.
+            query = group[0].get("description") or label
+            offers = bright_data_offers(query)
+            if offers:
+                best = offers[0]
+                unit = best["price"]
+                supplier = vendor = best["supplier"]
+                source_url = best["url"]
+                price_source, pricing_asof = "brightdata", datetime.now().isoformat()
+            elif live.get(sym_type):
+                quote = live[sym_type]
                 unit = float(quote["unit_price"])
-                price_source = "brightdata"
+                vendor = quote.get("vendor") or ""
+                supplier = vendor
+                source_url = quote.get("source_url") or ""
+                price_source, pricing_asof = "brightdata", datetime.now().isoformat()
             else:
                 unit = float(PRICE_TABLE.get(sym_type, DEFAULT_UNIT_PRICE))
-                price_source = "static"
+                supplier, vendor, source_url = "", "", ""
+                price_source, pricing_asof = "static", None
+
             total = round(unit * qty, 2)
-            subtotal += total
-            item = {
-                "type": sym_type,
-                "label": group[0]["label"],
-                "quantity": qty,
-                "unit": "ea",                 # unit of measure (each) — per diagram contract
-                "unit_price": unit,
-                "total": total,
-                "price_source": price_source,  # "brightdata" | "static" — provenance for the UI
-                "boxes": [[d["x"], d["y"], d["w"], d["h"]] for d in group],
-            }
-            if quote and quote.get("vendor"):
-                item["vendor"] = quote["vendor"]
-            if quote and quote.get("source_url"):
-                item["source_url"] = quote["source_url"]
-            priced_items.append(item)
+            material_subtotal += total
+            priced_items.append(
+                {
+                    "type": sym_type,
+                    "label": label,
+                    "quantity": qty,
+                    "unit": "ea",
+                    "unit_price": unit,
+                    "total": total,
+                    "boxes": [[d["x"], d["y"], d["w"], d["h"]] for d in group],
+                    "price_source": price_source,
+                    "pricing_asof": pricing_asof,
+                    "vendor": vendor,
+                    "supplier": supplier,        # cheapest supplier (Bright Data)
+                    "source_url": source_url,
+                    "offers": offers,            # every offer, nothing filtered (compare UI)
+                }
+            )
+
+        # totals (backend is the single pricing authority; labor = % of material subtotal)
+        material_subtotal = round(material_subtotal, 2)
+        labor_total = round(material_subtotal * labor_pct / 100.0, 2)
+        grand_total = round(material_subtotal + labor_total, 2)
+        totals = {
+            "material_subtotal": material_subtotal,
+            "labor_pct": labor_pct,
+            "labor_total": labor_total,
+            "grand_total": grand_total,
+        }
 
         # --- 5. proposal ---
         lines = [f"FlashPod Electrical Proposal — {project_name}",
@@ -254,7 +354,9 @@ async def analyze_drawing(payload: dict) -> dict:
         for it in priced_items:
             lines.append(f"{it['label']:<20}{it['quantity']:>6}{it['unit_price']:>12.2f}{it['total']:>14.2f}")
         lines.append("-" * 52)
-        lines.append(f"{'SUBTOTAL':<38}{round(subtotal, 2):>14.2f}")
+        lines.append(f"{'MATERIAL SUBTOTAL':<38}{material_subtotal:>14.2f}")
+        lines.append(f"{f'LABOR ({labor_pct:.0f}%)':<38}{labor_total:>14.2f}")
+        lines.append(f"{'GRAND TOTAL':<38}{grand_total:>14.2f}")
 
         # --- 6. return JSON ---
         img_w, img_h = int(drawing.shape[1]), int(drawing.shape[0])
@@ -263,6 +365,7 @@ async def analyze_drawing(payload: dict) -> dict:
             "project_name": project_name,
             "detections": detections,
             "priced_items": priced_items,
+            "totals": totals,
             "proposal": "\n".join(lines),
             # diagram contract: meta carries image dims + total symbol count.
             "meta": {

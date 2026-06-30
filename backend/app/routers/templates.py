@@ -17,7 +17,9 @@ def upload_template(
     project_id: int,
     sym_type: str = Form(..., description="Symbol type key, e.g. 'duplex_outlet'"),
     label: str = Form(..., description="Human label, e.g. 'Duplex Outlet'"),
-    threshold: float = Form(0.7, description="Template-match confidence threshold (0–1)"),
+    threshold: float = Form(
+        0.7, ge=0.0, le=1.0, description="Template-match confidence threshold (0–1)"
+    ),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
@@ -25,6 +27,8 @@ def upload_template(
         raise HTTPException(404, "Project not found")
 
     data = file.file.read()
+    if not data:
+        raise HTTPException(400, "Uploaded template is empty")
     saved = save_file(data, "templates", file.filename or "template.png")
 
     tpl = Template(

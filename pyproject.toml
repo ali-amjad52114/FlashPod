@@ -7,8 +7,15 @@ dependencies = [
     "runpod-flash",
     "python-dotenv",
     "aiohttp",   # load_test.py
-    "requests",  # scripts/check_account.py, brightdata_demo.py
+    "requests",  # scripts/check_account.py, pricing/scraper.py
 ]
+
+[project.optional-dependencies]
+dev = ["pytest"]
 
 [tool.uv]
 # Flash GPU workers run Python 3.12; pin locally to match.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

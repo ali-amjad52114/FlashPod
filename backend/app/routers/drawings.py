@@ -36,6 +36,8 @@ def upload_drawing(
         raise HTTPException(404, "Project not found")
 
     data = file.file.read()
+    if not data:
+        raise HTTPException(400, "Uploaded drawing is empty")
     saved = save_file(data, "drawings", file.filename or "drawing.png")
 
     drawing = Drawing(
