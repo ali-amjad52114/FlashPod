@@ -1,3 +1,7 @@
+# DEPRECATED — pricing has moved into the Runpod worker (analyze_drawing calls
+# Bright Data internally). This module is no longer called by the takeoff flow.
+# Kept for reference; remove once worker-side integration is confirmed live.
+
 """Client for the Bright Data-backed material-pricing service.
 
 Bright Data is FlashPod's **live pricing** layer: given a list of electrical

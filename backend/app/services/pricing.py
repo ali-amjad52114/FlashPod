@@ -1,3 +1,9 @@
+# DEPRECATED — pricing has moved into the Runpod worker (analyze_drawing calls
+# Bright Data internally). apply_live_prices() is no longer called by the takeoff
+# flow. build_proposal_text() is still used by the PATCH /takeoffs/{id}/items/{type}
+# manual-correction endpoint. Remove apply_live_prices() once worker-side
+# integration is confirmed live.
+
 """Overlay live Bright Data prices onto the worker's priced items.
 
 The Runpod worker counts symbols and prices them with a built-in static
