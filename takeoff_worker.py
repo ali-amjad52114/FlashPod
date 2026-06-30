@@ -10,6 +10,8 @@
 #   - @Endpoint(name=..., cpu=..., workers=..., dependencies=[...]) on an async function (QB mode)
 #   - SKILL Gotcha #1: ONLY the function body ships under `flash dev`, so ALL imports,
 #     constants, and helpers live INSIDE the body (a module-level name would NameError remotely).
+import os
+
 from runpod_flash import Endpoint
 
 
@@ -17,7 +19,14 @@ from runpod_flash import Endpoint
     name="flashpod-takeoff",
     cpu="cpu5c-4-8",            # 4 vCPU / 8GB -- enough for OpenCV template matching
     workers=(1, 1),            # keep 1 worker warm -> no cold start during the demo
-    dependencies=["opencv-python", "pillow", "numpy", "requests"],
+    dependencies=["opencv-python-headless", "pillow", "numpy", "requests"],
+    # Decorator args evaluate LOCALLY at build/deploy time, so os.getenv reads
+    # YOUR .env here and ships the value to the worker as an env var. Unset =>
+    # worker prices from the static PRICE_TABLE fallback (demo never breaks).
+    env={
+        "BRIGHTDATA_PRICING_URL": os.getenv("BRIGHTDATA_PRICING_URL", ""),
+        "BRIGHTDATA_API_KEY": os.getenv("BRIGHTDATA_API_KEY", ""),
+    },
 )
 async def analyze_drawing(payload: dict) -> dict:
     """
@@ -29,10 +38,13 @@ async def analyze_drawing(payload: dict) -> dict:
 
     Output:
         detections:   [{ type, label, x, y, w, h, confidence }]   - one per detected symbol
-        priced_items: [{ type, label, quantity, unit_price, total, boxes }]  - grouped + priced
+        priced_items: [{ type, label, quantity, unit, unit_price, total,
+                         price_source, vendor?, source_url?, boxes }]  - grouped + priced
         proposal:     str                                          - formatted proposal text
-        project_name, image_size
+        meta:         { image_width, image_height, total_symbols }
+        project_name, image_size, timestamp
 
+    price_source is "brightdata" (live) or "static" (PRICE_TABLE fallback).
     The frontend uses priced_items[].boxes for the wow feature:
     click a proposal line -> highlight every matching symbol on the drawing.
     """
@@ -45,9 +57,11 @@ async def analyze_drawing(payload: dict) -> dict:
     from PIL import Image
 
     # --- constants/helpers live INSIDE the body (SKILL Gotcha #1) ---
-    PRICE_MAP = {
+    # Static fallback price table — used when Bright Data is unset/unreachable
+    # so the demo never breaks (see architecture diagram, "Static Fallback").
+    PRICE_TABLE = {
         "duplex_outlet": 4.25,
-        "gfci_outlet": 18.50,
+        "gfci_outlet": 18.75,
         "data_drop": 12.00,
         "switch": 3.25,
         "light": 45.00,
@@ -62,6 +76,64 @@ async def analyze_drawing(payload: dict) -> dict:
         "panel": "Panel",
     }
     DEFAULT_UNIT_PRICE = 5.00
+
+    def live_prices(sym_types: list) -> dict:
+        """Step 04 — Bright Data live material prices, keyed by symbol type.
+
+        Best-effort: POSTs the symbol types to the Bright Data pricing service
+        (REST contract mirrors backend/app/services/brightdata_client.py) and
+        returns { sym_type: {"unit_price", "vendor", "source_url"} }. ANY problem
+        — URL unset, timeout, bad JSON, non-200 — returns {} so the caller falls
+        back to PRICE_TABLE. Pricing must NEVER fail the takeoff.
+        """
+        import os
+        import requests
+
+        url = os.environ.get("BRIGHTDATA_PRICING_URL", "")
+        if not url or not sym_types:
+            return {}
+
+        headers = {}
+        api_key = os.environ.get("BRIGHTDATA_API_KEY", "")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        items = [{"sym_type": t, "label": LABELS.get(t, t), "query": LABELS.get(t, t)}
+                 for t in sym_types]
+
+        try:
+            resp = requests.post(url, json={"items": items}, headers=headers, timeout=8)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            return {}   # any failure -> static fallback
+
+        out = {}
+        rows = data.get("prices") if isinstance(data, dict) else None
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                t = row.get("sym_type") or row.get("type")
+                price = row.get("unit_price", row.get("price"))
+                try:
+                    price = float(price)
+                except (TypeError, ValueError):
+                    continue
+                if not t or price <= 0:
+                    continue
+                out[t] = {"unit_price": round(price, 2),
+                          "vendor": row.get("vendor"),
+                          "source_url": row.get("source_url") or row.get("url")}
+        elif isinstance(data, dict):
+            # plain { sym_type: price } map
+            for t, price in data.items():
+                try:
+                    price = float(price)
+                except (TypeError, ValueError):
+                    continue
+                if price > 0:
+                    out[t] = {"unit_price": round(price, 2), "vendor": None, "source_url": None}
+        return out
 
     def decode_gray(b64: str) -> "np.ndarray":
         raw = base64.b64decode(b64)
@@ -136,29 +208,43 @@ async def analyze_drawing(payload: dict) -> dict:
                     }
                 )
 
-        # --- 3 + 4. count + price (group detections by type) ---
+        # --- 3. count (group detections by type) ---
         priced_items = []
         subtotal = 0.0
         types_in_order = []
         for d in detections:
             if d["type"] not in types_in_order:
                 types_in_order.append(d["type"])
+
+        # --- 4. price: Bright Data live lookup, static PRICE_TABLE fallback ---
+        live = live_prices(types_in_order)   # {} if Bright Data unset/unreachable
         for sym_type in types_in_order:
             group = [d for d in detections if d["type"] == sym_type]
             qty = len(group)
-            unit = float(PRICE_MAP.get(sym_type, DEFAULT_UNIT_PRICE))
+            quote = live.get(sym_type)
+            if quote:
+                unit = float(quote["unit_price"])
+                price_source = "brightdata"
+            else:
+                unit = float(PRICE_TABLE.get(sym_type, DEFAULT_UNIT_PRICE))
+                price_source = "static"
             total = round(unit * qty, 2)
             subtotal += total
-            priced_items.append(
-                {
-                    "type": sym_type,
-                    "label": group[0]["label"],
-                    "quantity": qty,
-                    "unit_price": unit,
-                    "total": total,
-                    "boxes": [[d["x"], d["y"], d["w"], d["h"]] for d in group],
-                }
-            )
+            item = {
+                "type": sym_type,
+                "label": group[0]["label"],
+                "quantity": qty,
+                "unit": "ea",                 # unit of measure (each) — per diagram contract
+                "unit_price": unit,
+                "total": total,
+                "price_source": price_source,  # "brightdata" | "static" — provenance for the UI
+                "boxes": [[d["x"], d["y"], d["w"], d["h"]] for d in group],
+            }
+            if quote and quote.get("vendor"):
+                item["vendor"] = quote["vendor"]
+            if quote and quote.get("source_url"):
+                item["source_url"] = quote["source_url"]
+            priced_items.append(item)
 
         # --- 5. proposal ---
         lines = [f"FlashPod Electrical Proposal — {project_name}",
@@ -171,13 +257,21 @@ async def analyze_drawing(payload: dict) -> dict:
         lines.append(f"{'SUBTOTAL':<38}{round(subtotal, 2):>14.2f}")
 
         # --- 6. return JSON ---
+        img_w, img_h = int(drawing.shape[1]), int(drawing.shape[0])
         return {
             "status": "success",
             "project_name": project_name,
             "detections": detections,
             "priced_items": priced_items,
             "proposal": "\n".join(lines),
-            "image_size": {"width": int(drawing.shape[1]), "height": int(drawing.shape[0])},
+            # diagram contract: meta carries image dims + total symbol count.
+            "meta": {
+                "image_width": img_w,
+                "image_height": img_h,
+                "total_symbols": len(detections),
+            },
+            # kept for backend compatibility (runpod_client reads image_size).
+            "image_size": {"width": img_w, "height": img_h},
             "timestamp": datetime.now().isoformat(),
         }
 

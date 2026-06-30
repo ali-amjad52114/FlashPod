@@ -887,13 +887,17 @@ name = "flashpod"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "python-dotenv" },
+    { name = "requests" },
     { name = "runpod-flash" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp" },
     { name = "python-dotenv" },
+    { name = "requests" },
     { name = "runpod-flash" },
 ]
 

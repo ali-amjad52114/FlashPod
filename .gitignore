@@ -6,3 +6,13 @@ __pycache__/
 reference/
 .agents/
 .claude/
+
+# Flash scans/bundles the whole tree (cwd) using .gitignore. Exclude the
+# non-worker code so `flash dev`/`flash deploy` only see takeoff_worker.py.
+# (backend/ needs sqlalchemy which isn't in this venv; scripts/check_account.py
+# runs an API call at import time.) Remove these to un-scope Flash again.
+backend/
+scripts/
+load_test.py
+uploads/
+*.db
