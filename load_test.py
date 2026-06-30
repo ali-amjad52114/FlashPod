@@ -39,7 +39,7 @@ async def send_request(
     """Send a single request and return timing data."""
     start = time.perf_counter()
     try:
-        async with session.post(url, json=payload) as resp:
+        async with session.post(url, json={"input": payload}) as resp:  # runsync expects {"input": ...}
             body = await resp.json()
             duration_ms = round((time.perf_counter() - start) * 1000, 2)
             return {
