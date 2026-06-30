@@ -1,3 +1,6 @@
+# DEPRECATED — worker now detects symbols internally; template crops are no
+# longer sent in the Runpod payload. These endpoints remain for existing clients
+# but will be removed once the frontend SymbolsScreen is updated.
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
