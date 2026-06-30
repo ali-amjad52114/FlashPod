@@ -21,7 +21,7 @@ from runpod_flash import Endpoint, GpuGroup, NetworkVolume
 
 @Endpoint(
     name="flashpod-detect-vl",
-    gpu=GpuGroup.AMPERE_80,          # A100 80GB -- available + headroom for 7B VLM on a high-res plan
+    gpu=GpuGroup.ADA_24,             # RTX 4090 24GB -- most-available Runpod serverless GPU; fits the 3B VLM
     workers=(1, 1),                  # one warm GPU worker (bills while up -> undeploy when done)
     dependencies=[
         "torch", "torchvision",
@@ -54,7 +54,7 @@ async def detect_symbols(payload: dict) -> dict:
     from qwen_vl_utils import process_vision_info
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
-    MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+    MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"   # 3B fits a 24GB GPU; bump to 7B on a 48/80GB card
 
     # --- constants/helpers INSIDE the body (Gotcha #1) ---
     PRICE_TABLE = {
