@@ -121,7 +121,7 @@ def test_patch_only_unit_price_preserves_quantity(client, db):
     resp = client.patch(f"/takeoffs/{t.id}/items/switch", json={"unit_price": 6.00})
     assert resp.status_code == 200
     switch = next(i for i in resp.json()["priced_items"] if i["type"] == "switch")
-    assert switch["quantity"] == 5       # unchanged
+    assert switch["quantity"] == 5        # unchanged
     assert switch["unit_price"] == 6.00
     assert switch["total"] == 30.00      # 5 * 6.00
 

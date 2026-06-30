@@ -3,6 +3,8 @@
 __pycache__/
 *.pyc
 .flash/
+pricing/.cache/
+data/priced_takeoff.json
 reference/
 .agents/
 .claude/

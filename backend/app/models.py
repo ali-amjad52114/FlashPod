@@ -50,6 +50,8 @@ class Drawing(Base):
     project: Mapped["Project"] = relationship(back_populates="drawings")
 
 
+# DEPRECATED — worker no longer needs template crops; detect symbols internally.
+# Kept to avoid a migration; remove once frontend SymbolsScreen is updated.
 class Template(Base):
     __tablename__ = "templates"
 
