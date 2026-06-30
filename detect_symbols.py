@@ -21,7 +21,7 @@ from runpod_flash import Endpoint, GpuGroup, NetworkVolume
 
 @Endpoint(
     name="flashpod-detect-vl",
-    gpu=GpuGroup.AMPERE_48,          # 48GB -- headroom for 7B VLM + a high-res plan
+    gpu=GpuGroup.AMPERE_80,          # A100 80GB -- available + headroom for 7B VLM on a high-res plan
     workers=(1, 1),                  # one warm GPU worker (bills while up -> undeploy when done)
     dependencies=[
         "torch", "torchvision",
