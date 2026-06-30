@@ -29,6 +29,7 @@ Design rules:
 """
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 
@@ -80,11 +81,14 @@ async def fetch_unit_prices(items: list[dict]) -> dict[str, PriceQuote]:
     request_items = [
         {
             "sym_type": it["sym_type"],
-            "label": it.get("label", it["sym_type"]),
+            "label": it.get("label") or it["sym_type"],
             "query": it.get("query") or it.get("label") or it["sym_type"],
         }
         for it in items
+        if it.get("sym_type")
     ]
+    if not request_items:
+        return {}
 
     headers: dict[str, str] = {}
     if BRIGHTDATA_API_KEY:
@@ -140,7 +144,7 @@ def _parse_prices(data: object) -> dict[str, PriceQuote]:
             unit_price = float(price)
         except (TypeError, ValueError):
             continue
-        if unit_price <= 0:
+        if not math.isfinite(unit_price) or unit_price <= 0:
             continue
         quotes[sym_type] = PriceQuote(
             sym_type=sym_type,
@@ -159,6 +163,6 @@ def _quote_from_scalar(sym_type: str, price: object) -> PriceQuote | None:
         unit_price = float(price)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-    if unit_price <= 0:
+    if not math.isfinite(unit_price) or unit_price <= 0:
         return None
     return PriceQuote(sym_type=sym_type, unit_price=round(unit_price, 2))

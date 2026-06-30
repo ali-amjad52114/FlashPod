@@ -91,15 +91,24 @@ def _unwrap(data: dict) -> dict:
     status = data.get("status")
 
     # Runpod serverless envelope: result lives under "output".
-    if "output" in data and isinstance(data["output"], dict):
-        return data["output"]
+    out = data.get("output")
+    if isinstance(out, dict):
+        return out
 
     # Runpod job-level failure (no output produced).
     if status in {"FAILED", "CANCELLED", "TIMED_OUT"}:
         return {
             "status": "error",
-            "error": data.get("error") or f"Runpod job {status}",
+            "error": str(data.get("error") or f"Runpod job {status}"),
         }
 
-    # flash dev / already-unwrapped worker dict.
+    # Terminal/queued Runpod statuses but no usable output dict — don't silently
+    # treat the bare envelope as an empty success.
+    if status in {"COMPLETED", "IN_QUEUE", "IN_PROGRESS"}:
+        return {
+            "status": "error",
+            "error": str(data.get("error") or f"Runpod job {status} returned no output"),
+        }
+
+    # flash dev / already-unwrapped worker dict (status in {success, error, None}).
     return data

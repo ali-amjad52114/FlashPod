@@ -1,8 +1,10 @@
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from ..db import get_db
 from ..models import (
@@ -20,6 +22,39 @@ from ..services.proposal_export import export_pdf
 from ..services.runpod_client import call_analyze_drawing
 
 router = APIRouter(tags=["takeoffs"])
+logger = logging.getLogger(__name__)
+
+
+async def _apply_live_pricing(
+    project_name: str,
+    priced_items: list[dict],
+    proposal: str | None,
+) -> tuple[list[dict], str | None]:
+    """Overlay live Bright Data prices, never raising on failure.
+
+    Returns the (possibly repriced) items and proposal. On any error — or when
+    pricing is disabled/unreachable — returns the inputs unchanged so a working
+    takeoff is preserved with the worker's fallback prices.
+    """
+    if not priced_items:
+        return priced_items, proposal
+    try:
+        quotes = await fetch_unit_prices(
+            [
+                {"sym_type": it.get("type"), "label": it.get("label", it.get("type"))}
+                for it in priced_items
+                if it.get("type")
+            ]
+        )
+        if not quotes:
+            return priced_items, proposal
+        repriced_items, repriced = apply_live_prices(priced_items, quotes)
+        if repriced:
+            return repriced_items, build_proposal_text(project_name, repriced_items)
+        return repriced_items, proposal
+    except Exception:  # best-effort: pricing must never fail a successful takeoff
+        logger.exception("Live pricing overlay failed; keeping worker prices")
+        return priced_items, proposal
 
 
 @router.post(
@@ -81,25 +116,18 @@ async def run_takeoff(
             takeoff.status = "error"
             takeoff.error = result.get("error", "Worker returned error")
         else:
-            priced_items = result.get("priced_items", [])
+            priced_items = result.get("priced_items") or []
             proposal = result.get("proposal")
 
-            # Overlay live Bright Data prices onto the worker's counts. Best-effort:
-            # if pricing is disabled or unreachable, fetch_unit_prices returns {} and
-            # we keep the worker's fallback prices.
-            quotes = await fetch_unit_prices(
-                [
-                    {"sym_type": it["type"], "label": it.get("label", it["type"])}
-                    for it in priced_items
-                ]
+            # Overlay live Bright Data prices onto the worker's counts. Best-effort
+            # and fully isolated: a pricing failure must never fail a successful
+            # detection, so it's caught here and we keep the worker's fallback prices.
+            priced_items, proposal = await _apply_live_pricing(
+                proj.name, priced_items, proposal
             )
-            if quotes:
-                priced_items, repriced = apply_live_prices(priced_items, quotes)
-                if repriced:
-                    proposal = build_proposal_text(proj.name, priced_items)
 
             takeoff.status = "done"
-            takeoff.detections = result.get("detections", [])
+            takeoff.detections = result.get("detections") or []
             takeoff.priced_items = priced_items
             takeoff.proposal = proposal
             takeoff.image_size = result.get("image_size")
@@ -145,17 +173,23 @@ def correct_item(
     if not t.priced_items:
         raise HTTPException(400, "Takeoff has no priced items to correct")
 
-    # Reassign to a fresh list so SQLAlchemy detects the mutation on the JSON column.
-    items = list(t.priced_items)
+    if body.quantity is None and body.unit_price is None:
+        raise HTTPException(400, "Provide at least one of 'quantity' or 'unit_price'")
+
+    # Deep-copy so we don't mutate SQLAlchemy's loaded snapshot in place — an
+    # in-place edit makes the column compare equal to its committed state and the
+    # UPDATE gets skipped. flag_modified then guarantees the JSON column is written.
+    items = [dict(it) for it in t.priced_items]
     for item in items:
-        if item["type"] == sym_type:
+        if item.get("type") == sym_type:
             if body.quantity is not None:
                 item["quantity"] = body.quantity
             if body.unit_price is not None:
                 item["unit_price"] = body.unit_price
-            item["total"] = round(item["quantity"] * item["unit_price"], 2)
+            item["total"] = round(item.get("quantity", 0) * item.get("unit_price", 0), 2)
             item["price_source"] = "manual"
             t.priced_items = items
+            flag_modified(t, "priced_items")
             # Keep the proposal text in sync with the corrected totals.
             t.proposal = build_proposal_text(t.project.name, items)
             db.commit()

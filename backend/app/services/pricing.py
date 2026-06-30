@@ -65,11 +65,15 @@ def build_proposal_text(project_name: str, priced_items: list[dict]) -> str:
     subtotal = 0.0
     has_live = False
     for it in priced_items:
-        subtotal += float(it.get("total", 0.0))
+        label = str(it.get("label", it.get("type", "?")))
+        qty = it.get("quantity", 0)
+        unit_price = float(it.get("unit_price", 0.0))
+        total = float(it.get("total", 0.0))
+        subtotal += total
         live = it.get("price_source") == "brightdata"
         has_live = has_live or live
-        unit = f"{it['unit_price']:.2f}{'*' if live else ' '}"
-        lines.append(f"{it['label']:<20}{it['quantity']:>6}{unit:>12}{it['total']:>14.2f}")
+        unit = f"{unit_price:.2f}{'*' if live else ' '}"
+        lines.append(f"{label:<20}{qty:>6}{unit:>12}{total:>14.2f}")
 
     lines.append("-" * 52)
     lines.append(f"{'SUBTOTAL':<38}{round(subtotal, 2):>14.2f}")

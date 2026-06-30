@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -95,7 +95,7 @@ class Takeoff(Base):
 
 
 class ProjectCreate(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1, max_length=255)
 
 
 class ProjectOut(BaseModel):
@@ -148,5 +148,5 @@ class TakeoffOut(BaseModel):
 
 
 class ItemCorrection(BaseModel):
-    quantity: Optional[int] = None
-    unit_price: Optional[float] = None
+    quantity: Optional[int] = Field(None, ge=0)
+    unit_price: Optional[float] = Field(None, ge=0)

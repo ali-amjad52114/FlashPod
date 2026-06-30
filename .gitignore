@@ -6,3 +6,7 @@ __pycache__/
 reference/
 .agents/
 .claude/
+
+# Backend runtime artifacts (uploaded drawings/templates + local SQLite DB)
+backend/uploads/
+backend/*.db
