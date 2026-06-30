@@ -31,10 +31,11 @@ async def run_takeoff(
     body: TakeoffRequest,
     db: Session = Depends(get_db),
 ):
-    """Trigger an electrical takeoff for a drawing.
+    """Trigger an electrical takeoff for an uploaded schematic.
 
-    Builds the Runpod payload from the stored drawing + all project templates,
-    POSTs to the analyze_drawing endpoint, and persists the result.
+    Vision-LLM flow: sends only the drawing to the analyze_drawing endpoint —
+    the worker detects, counts, prices, and writes the proposal — then persists
+    the result.
     """
     proj = db.get(Project, project_id)
     if not proj:

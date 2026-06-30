@@ -30,9 +30,13 @@ async def call_analyze_drawing(
 ) -> dict:
     """Build the Runpod payload and POST to the analyze_drawing endpoint.
 
+    Vision-LLM flow: the worker reads the uploaded schematic and detects, counts,
+    prices, and writes the proposal itself, so the only input is the image. No
+    OpenCV template crops are sent (the LLM recognizes symbols from the drawing).
+
     Args:
         project_name: project label forwarded to the worker.
-        image_path: local path to the drawing file.
+        image_path: local path to the uploaded schematic drawing.
 
     Returns:
         The JSON response from the worker:
