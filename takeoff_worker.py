@@ -45,23 +45,25 @@ async def analyze_drawing(payload: dict) -> dict:
     from PIL import Image
 
     # --- constants/helpers live INSIDE the body (SKILL Gotcha #1) ---
-    PRICE_MAP = {
-        "duplex_outlet": 4.25,
-        "gfci_outlet": 18.50,
-        "data_drop": 12.00,
-        "switch": 3.25,
-        "light": 45.00,
-        "panel": 320.00,
+    # Pricebook = real, sourced prices baked from pricing/catalog.json (Bright Data SERP ->
+    # Google Shopping) by `python -m pricing.embed_pricebook`. The frontend may override per
+    # request with payload["pricebook"]; otherwise this embedded copy is used (demo-safe, no
+    # live scraping in the request path). Regenerate this block, don't hand-edit it.
+    # >>> PRICEBOOK_START
+    EMBEDDED_PRICEBOOK = {
+        "duplex_outlet": {"label": 'Duplex Outlet', "unit_price": 1.55, "sku": 'Leviton CBR15-W', "supplier": 'Leviton e-Store', "source_url": 'https://www.google.com/search?ibp=oshop&q=15+Amp+125+Volt+NEMA+5-15R+2P+3W+Contractor+Pack15+Amp+125+Volt+NEMA+5-15R+2P+3W+Contractor+Pack&prds=catalogid%3A7116039229633873349%2Cgpcid%3A12947354356641829289%2CimageDocid%3A5535766061077255691%2Cproductid%3A18288011663734150479&pvorigin=25&hl=en&gl=us&udm=28&shndl=37&shem=pvflt%2Cshrtsdl&source=sh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1&utm_source=pvflt%2Cshrtsdl%2Csh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1', "unit": 'each'},
+        "gfci_outlet": {"label": 'GFCI Outlet', "unit_price": 16.59, "sku": 'Leviton GFNT2-W', "supplier": 'SupplyHouse.com', "source_url": 'https://www.google.com/search?ibp=oshop&q=Leviton+SmartlockPro+Slim+GFCI+ReceptacleLeviton+SmartlockPro+Slim+GFCI+Receptacle&prds=catalogid%3A53964250601653404%2Cgpcid%3A8197523473656457626%2CimageDocid%3A7541868368990475074%2Cproductid%3A6356380476501243508&pvorigin=25&hl=en&gl=us&udm=28&shndl=37&shem=pvflt%2Cshrtsdl&source=sh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1&utm_source=pvflt%2Cshrtsdl%2Csh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1', "unit": 'each'},
+        "data_drop": {"label": 'Data Drop (Cat6)', "unit_price": 1.71, "sku": 'Cat6 RJ45 Keystone Jack', "supplier": 'CablesAndKits.com', "source_url": 'https://www.google.com/search?ibp=oshop&q=CablesAndKits+Cat6+Rj45+110+Type+Keystone+Jack+KEY110-6CablesAndKits+Cat6+Rj45+110+Type+Keystone+Jack+KEY110-6&prds=catalogid%3A4821789462863043640%2Cgpcid%3A2858765303885047818%2CimageDocid%3A4858507702383649817%2Cproductid%3A17935077814640507381&pvorigin=25&hl=en&gl=us&udm=28&shndl=37&shem=pvflt%2Cshrtsdl&source=sh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1&utm_source=pvflt%2Cshrtsdl%2Csh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1', "unit": 'each'},
+        "switch": {"label": 'Switch', "unit_price": 1.19, "sku": 'Leviton CS115-2W', "supplier": 'Leviton e-Store', "source_url": 'https://www.google.com/search?ibp=oshop&q=Leviton+Toggle+Switch+CSB2-20ILeviton+Toggle+Switch+CSB2-20I&prds=catalogid%3A6345518674821234026%2Cgpcid%3A14850473835050576701%2CimageDocid%3A15708073692363749914%2Cproductid%3A9613270085794110108&pvorigin=25&hl=en&gl=us&udm=28&shndl=37&shem=pvflt%2Cshrtsdl&source=sh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1&utm_source=pvflt%2Cshrtsdl%2Csh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1', "unit": 'each'},
+        "light": {"label": 'Light Fixture', "unit_price": 42.49, "sku": '2x4 LED Troffer', "supplier": 'Sunco Lighting', "source_url": 'https://www.google.com/search?ibp=oshop&q=Sunco+Lighting+Sunco+2x4+LED+Flat+Panel+Light+Drop+Ceiling+Office+FixtureSunco+Lighting+Sunco+2x4+LED+Flat+Panel+Light+Drop+Ceiling+Office+Fixture&prds=catalogid%3A15911788851794910235%2Cgpcid%3A3137338517961806168%2CimageDocid%3A13249523128873280315%2Cproductid%3A10950530735660362537&pvorigin=25&hl=en&gl=us&udm=28&shndl=37&shem=pvflt%2Cshrtsdl&source=sh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1&utm_source=pvflt%2Cshrtsdl%2Csh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1', "unit": 'each'},
+        "panel": {"label": 'Panel', "unit_price": 75.99, "sku": 'Square D Homeline 200A', "supplier": 'menards', "source_url": 'https://www.google.com/search?ibp=oshop&q=Square+D+HOM3060M200PCVP+Homeline+200+Amp+30-Space+60-Circuit+Indoor+Main+Breaker+Plug-On+Neutral+Load+Center+with+Cover%28HOM3060M200PCVP%29Square+D+HOM3060M200PCVP+Homeline+200+Amp+30-Space+60-Circuit+Indoor+Main+Breaker+Plug-On+Neutral+Load+Center+with+Cover%28HOM3060M200PCVP%29&prds=imageDocid%3A7734948543441387062%2Cproductid%3A15766802451237324944&pvorigin=25&hl=en&gl=us&udm=28&shndl=37&shem=pvflt%2Cshrtsdl&source=sh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1&utm_source=pvflt%2Cshrtsdl%2Csh%2Fx%2Fprdct%2Fhdr%2Fm1%2F1', "unit": 'each'},
     }
-    LABELS = {
-        "duplex_outlet": "Duplex Outlet",
-        "gfci_outlet": "GFCI Outlet",
-        "data_drop": "Data Drop",
-        "switch": "Switch",
-        "light": "Light Fixture",
-        "panel": "Panel",
-    }
+    # <<< PRICEBOOK_END
     DEFAULT_UNIT_PRICE = 5.00
+
+    def label_for(sym_type: str) -> str:
+        entry = pricebook.get(sym_type) or {}
+        return entry.get("label") or sym_type.replace("_", " ").title()
 
     def decode_gray(b64: str) -> "np.ndarray":
         raw = base64.b64decode(b64)
@@ -95,6 +97,7 @@ async def analyze_drawing(payload: dict) -> dict:
     project_name = payload.get("project_name", "Electrical Takeoff")
     image_b64 = payload.get("image_base64")
     templates = payload.get("templates") or []
+    pricebook = payload.get("pricebook") or EMBEDDED_PRICEBOOK
     if not image_b64:
         return {"status": "error", "error": "Provide 'image_base64'."}
 
@@ -105,7 +108,7 @@ async def analyze_drawing(payload: dict) -> dict:
         detections = []
         for tpl in templates:
             sym_type = tpl.get("type", "symbol")
-            label = tpl.get("label", LABELS.get(sym_type, sym_type.replace("_", " ").title()))
+            label = tpl.get("label") or label_for(sym_type)
             tpl_b64 = tpl.get("template_base64")
             threshold = float(tpl.get("threshold", 0.7))
             if not tpl_b64:
@@ -146,7 +149,8 @@ async def analyze_drawing(payload: dict) -> dict:
         for sym_type in types_in_order:
             group = [d for d in detections if d["type"] == sym_type]
             qty = len(group)
-            unit = float(PRICE_MAP.get(sym_type, DEFAULT_UNIT_PRICE))
+            entry = pricebook.get(sym_type) or {}
+            unit = float(entry.get("unit_price", DEFAULT_UNIT_PRICE))
             total = round(unit * qty, 2)
             subtotal += total
             priced_items.append(
@@ -156,6 +160,9 @@ async def analyze_drawing(payload: dict) -> dict:
                     "quantity": qty,
                     "unit_price": unit,
                     "total": total,
+                    "sku": entry.get("sku", ""),         # real product behind the price
+                    "supplier": entry.get("supplier", ""),  # cheapest in-stock supplier
+                    "source_url": entry.get("source_url", ""),
                     "boxes": [[d["x"], d["y"], d["w"], d["h"]] for d in group],
                 }
             )
