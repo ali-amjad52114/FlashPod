@@ -81,6 +81,29 @@ async def analyze_drawing(payload: dict) -> dict:
     }
     DEFAULT_UNIT_PRICE = 5.00
 
+    # Spec-aware search strings so the SERP returns the RIGHT product — a bare label
+    # like "Switch" matches cheap unrelated parts. Keyword-matched against the symbol
+    # type/label (first hit wins, so order matters); generic electrical fallback.
+    SEARCH_QUERIES = {
+        "gfci": "15 amp gfci receptacle outlet tamper resistant",
+        "duplex": "15 amp 125v duplex receptacle outlet tamper resistant",
+        "data": "rj45 cat6 keystone data jack wall outlet",
+        "tv": "coax f-type tv coaxial wall jack outlet",
+        "switch": "15 amp single pole decorator wall light switch",
+        "light": "led recessed ceiling light fixture",
+        "smoke": "hardwired smoke detector 120v",
+        "panel": "200 amp main breaker load center panel",
+        "receptacle": "15 amp 125v duplex receptacle outlet",
+        "outlet": "15 amp 125v duplex receptacle outlet",
+    }
+
+    def search_query(sym_type: str, label: str) -> str:
+        hay = (str(sym_type) + " " + str(label)).lower()
+        for key, q in SEARCH_QUERIES.items():
+            if key in hay:
+                return q
+        return f"{label} electrical wiring device"
+
     # Embedded legend templates (base64) — used when the caller sends no
     # 'templates' (the backend's image-only contract). Only the body ships,
     # so assets must live inline here. Crops are from this drawing's legend.
@@ -98,6 +121,17 @@ async def analyze_drawing(payload: dict) -> dict:
         raw = base64.b64decode(b64)
         pil = Image.open(BytesIO(raw)).convert("L")   # Pillow load -> grayscale
         return np.array(pil)
+
+    def decode_rgb(b64: str) -> "np.ndarray":
+        raw = base64.b64decode(b64)
+        return np.array(Image.open(BytesIO(raw)).convert("RGB"))
+
+    def ink_color(rgb):
+        """Mean color of the non-white (ink) pixels — a symbol's stroke color.
+        Returns None when the region has too little ink to judge."""
+        flat = rgb.reshape(-1, 3).astype(np.float32)
+        ink = flat[(255 - flat.min(axis=1)) > 60]
+        return ink.mean(axis=0) if ink.shape[0] >= 4 else None
 
     def nms(boxes, scores, iou_thresh=0.3):
         if not boxes:
@@ -195,8 +229,15 @@ async def analyze_drawing(payload: dict) -> dict:
 
     try:
         drawing = decode_gray(image_b64)
+        drawing_rgb = decode_rgb(image_b64)
 
-        # --- 2. detect symbols (multi-scale OpenCV template matching) ---
+        # Color gate: template matching runs in grayscale (it finds every shape
+        # match, incl. same-shape/different-color symbols — blue duplex vs red GFCI,
+        # green data vs purple TV, the orange switch vs every circle). We then reject
+        # any match whose region stroke-color is far from the template's stroke-color.
+        COLOR_TOL = 85.0
+
+        # --- 2. detect symbols (multi-scale OpenCV template matching + color gate) ---
         detections = []
         for tpl in templates:
             sym_type = tpl.get("type", "symbol")
@@ -206,6 +247,7 @@ async def analyze_drawing(payload: dict) -> dict:
             if not tpl_b64:
                 continue
             template = decode_gray(tpl_b64)
+            tpl_color = ink_color(decode_rgb(tpl_b64))   # template's stroke color (or None)
 
             boxes, scores = [], []
             for scale in (0.8, 0.9, 1.0, 1.1, 1.25):
@@ -217,6 +259,10 @@ async def analyze_drawing(payload: dict) -> dict:
                 res = cv2.matchTemplate(drawing, resized, cv2.TM_CCOEFF_NORMED)
                 ys, xs = np.where(res >= threshold)
                 for x, y in zip(xs.tolist(), ys.tolist()):
+                    if tpl_color is not None:
+                        rc = ink_color(drawing_rgb[y:y + th, x:x + tw])
+                        if rc is not None and float(np.linalg.norm(rc - tpl_color)) > COLOR_TOL:
+                            continue   # color mismatch -> not this symbol type
                     boxes.append([int(x), int(y), int(tw), int(th)])
                     scores.append(float(res[y, x]))
 
@@ -250,13 +296,16 @@ async def analyze_drawing(payload: dict) -> dict:
             # Phase 7: live Bright Data price (query by description if present, else label);
             # cheapest offer is the headline, all offers ride along. On any failure / missing
             # key, fall back to the static PRICE_TABLE (price_source="static").
-            query = group[0].get("description") or label
+            query = group[0].get("description") or search_query(sym_type, label)
             offers = bright_data_offers(query)
             if offers:
-                best = offers[0]
-                unit = best["price"]
-                supplier = vendor = best["supplier"]
-                source_url = best["url"]
+                # Headline = MEDIAN offer (offers are sorted cheapest-first), so a
+                # stray $1 auction/accessory doesn't set the price. All offers still
+                # ride along (cheapest-first) for the cross-check / compare UI.
+                headline = offers[len(offers) // 2]
+                unit = headline["price"]
+                supplier = vendor = headline["supplier"]
+                source_url = headline["url"]
                 price_source, pricing_asof = "brightdata", datetime.now().isoformat()
             else:
                 unit = float(PRICE_TABLE.get(sym_type, DEFAULT_UNIT_PRICE))

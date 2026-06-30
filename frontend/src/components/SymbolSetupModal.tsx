@@ -1,100 +1,169 @@
-import { useRef, useState } from "react";
-import { uploadTemplate } from "../api";
-import { colorForType, slugify } from "../lib";
-import type { Project, Template } from "../types";
+import { useEffect, useState } from "react";
+import { autoDetectSymbols, confirmSymbols, type SymbolCandidate } from "../api";
+import { slugify } from "../lib";
+import type { Drawing, Project } from "../types";
 
-interface Rect { x: number; y: number; w: number; h: number; }
+interface Row {
+  cand: SymbolCandidate;
+  selected: boolean;
+  name: string;
+}
 
-// Compact "setup" step (modal) — select symbol examples before detection runs.
+// "Select symbol examples" — FlashPod auto-detects the legend glyphs; the user
+// just unchecks false positives, names each symbol, and confirms.
 export function SymbolSetupModal(props: {
   project: Project;
-  imageUrl: string;
+  drawing: Drawing;
   onContinue: () => void;
   onClose: () => void;
 }) {
-  const imgRef = useRef<HTMLImageElement>(null);
-  const [rect, setRect] = useState<Rect | null>(null);
-  const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
-  const [label, setLabel] = useState("");
-  const [threshold, setThreshold] = useState(0.7);
-  const [busy, setBusy] = useState(false);
+  const [rows, setRows] = useState<Row[] | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [added, setAdded] = useState<Template[]>([]);
+  const [busy, setBusy] = useState(false);
 
-  function rel(e: React.MouseEvent) {
-    const r = imgRef.current!.getBoundingClientRect();
-    return { x: Math.max(0, Math.min(e.clientX - r.left, r.width)), y: Math.max(0, Math.min(e.clientY - r.top, r.height)) };
-  }
-  function down(e: React.MouseEvent) { const p = rel(e); setDrag(p); setRect({ ...p, w: 0, h: 0 }); }
-  function move(e: React.MouseEvent) {
-    if (!drag) return;
-    const p = rel(e);
-    setRect({ x: Math.min(drag.x, p.x), y: Math.min(drag.y, p.y), w: Math.abs(p.x - drag.x), h: Math.abs(p.y - drag.y) });
+  useEffect(() => {
+    let alive = true;
+    autoDetectSymbols(props.project.id, props.drawing.id)
+      .then((res) => {
+        if (!alive) return;
+        setRows(res.candidates.map((c) => ({ cand: c, selected: true, name: "" })));
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setError((e as Error).message);
+        setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [props.project.id, props.drawing.id]);
+
+  function update(i: number, patch: Partial<Row>) {
+    setRows((rs) => (rs ? rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)) : rs));
   }
 
-  async function add() {
-    const img = imgRef.current;
-    if (!img || !rect || rect.w < 6 || rect.h < 6) return setError("Draw a box around one symbol.");
-    if (!label.trim()) return setError("Name the symbol (e.g. “Duplex Receptacle”).");
-    setError(null); setBusy(true);
+  const selected = rows?.filter((r) => r.selected) ?? [];
+  const allNamed = selected.every((r) => r.name.trim());
+
+  async function confirm() {
+    if (!rows) return;
+    const chosen = rows.filter((r) => r.selected);
+    if (chosen.length === 0) return setError("Select at least one symbol.");
+    if (!chosen.every((r) => r.name.trim())) return setError("Give every selected symbol a name.");
+    setError(null);
+    setBusy(true);
     try {
-      const k = { sx: (rect.x * img.naturalWidth) / img.clientWidth, sy: (rect.y * img.naturalHeight) / img.clientHeight, sw: (rect.w * img.naturalWidth) / img.clientWidth, sh: (rect.h * img.naturalHeight) / img.clientHeight };
-      const c = document.createElement("canvas");
-      c.width = Math.round(k.sw); c.height = Math.round(k.sh);
-      c.getContext("2d")!.drawImage(img, k.sx, k.sy, k.sw, k.sh, 0, 0, c.width, c.height);
-      const blob: Blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error("crop failed"))), "image/png"));
-      const tpl = await uploadTemplate(props.project.id, { sym_type: slugify(label), label: label.trim(), threshold, file: new File([blob], `${slugify(label)}.png`, { type: "image/png" }) });
-      setAdded((a) => [...a, tpl]); setRect(null); setLabel("");
-    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+      await confirmSymbols(
+        props.project.id,
+        props.drawing.id,
+        chosen.map((r) => ({
+          bbox: r.cand.bbox,
+          sym_type: slugify(r.name),
+          label: r.name.trim(),
+          threshold: 0.7,
+        })),
+      );
+      props.onContinue();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
     <div className="modal-overlay" onClick={props.onClose}>
-      <div className="panel" onClick={(e) => e.stopPropagation()} style={{ padding: 18, width: "min(920px, 96vw)", maxHeight: "92vh", overflow: "auto" }}>
-        <h2 style={{ margin: "0 0 2px", fontSize: 18 }}>Select symbol examples</h2>
+      <div
+        className="panel"
+        onClick={(e) => e.stopPropagation()}
+        style={{ padding: 18, width: "min(760px, 96vw)", maxHeight: "92vh", overflow: "auto" }}
+      >
+        <h2 style={{ margin: "0 0 2px", fontSize: 18 }}>Confirm detected symbols</h2>
         <p className="muted" style={{ margin: "0 0 14px", fontSize: 13 }}>
-          Draw a box around one of each symbol on the drawing. FlashPod matches these examples to count every instance.
+          FlashPod auto-detected these symbols from the drawing's legend. Uncheck any that
+          aren't symbols, name each one, then confirm — FlashPod counts every instance across
+          the drawing.
         </p>
 
-        <div className="two-col">
-          <div style={{ background: "var(--sheet)", border: "1px solid var(--hairline)", borderRadius: 6, padding: 8, overflow: "auto" }}>
-            <div style={{ position: "relative", display: "inline-block", cursor: "crosshair", userSelect: "none", maxWidth: "100%" }}
-              onMouseDown={down} onMouseMove={move} onMouseUp={() => setDrag(null)} onMouseLeave={() => setDrag(null)}>
-              <img ref={imgRef} src={props.imageUrl} alt="Drawing" draggable={false} style={{ maxWidth: "100%", display: "block" }} />
-              {rect && <div style={{ position: "absolute", left: rect.x, top: rect.y, width: rect.w, height: rect.h, border: "2px solid var(--accent)", background: "rgba(45,91,255,0.12)", pointerEvents: "none" }} />}
-            </div>
+        {loading && (
+          <div className="muted" style={{ padding: 28, textAlign: "center" }}>
+            Detecting symbols from the legend…
           </div>
+        )}
+        {error && (
+          <div style={{ color: "var(--danger)", fontSize: 13, marginBottom: 10 }}>{error}</div>
+        )}
 
-          <div style={{ display: "grid", gap: 12 }}>
-            <label style={{ display: "grid", gap: 5 }}>
-              <span style={{ fontSize: 12, color: "var(--secondary)" }}>Symbol name</span>
-              <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Duplex Receptacle" />
-            </label>
-            <label style={{ display: "grid", gap: 5 }}>
-              <span style={{ fontSize: 12, color: "var(--secondary)" }}>Match threshold <span className="mono">{threshold.toFixed(2)}</span></span>
-              <input type="range" min={0.3} max={0.95} step={0.05} value={threshold} onChange={(e) => setThreshold(parseFloat(e.target.value))} />
-            </label>
-            {error && <div style={{ color: "var(--danger)", fontSize: 12 }}>{error}</div>}
-            <button className="primary" disabled={busy} onClick={add}>{busy ? "Adding…" : "Add example"}</button>
-
-            <div className="panel" style={{ padding: 10, display: "grid", gap: 6 }}>
-              <span style={{ fontSize: 12, color: "var(--secondary)" }}>Examples ({added.length})</span>
-              {added.length === 0 ? <span className="muted" style={{ fontSize: 12 }}>None yet.</span> :
-                added.map((t) => (
-                  <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-                    <span style={{ width: 11, height: 11, borderRadius: 3, background: colorForType(t.sym_type) }} />
-                    {t.label}
-                    <span className="mono muted" style={{ marginLeft: "auto", fontSize: 12 }}>≥ {t.threshold.toFixed(2)}</span>
-                  </div>
-                ))}
-            </div>
+        {rows && rows.length === 0 && !loading && (
+          <div className="muted" style={{ padding: 16 }}>
+            No legend symbols were detected automatically on this drawing.
           </div>
-        </div>
+        )}
+
+        {rows && rows.length > 0 && (
+          <div style={{ display: "grid", gap: 8 }}>
+            {rows.map((r, i) => (
+              <div
+                key={r.cand.index}
+                className="panel"
+                style={{
+                  padding: 10,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  opacity: r.selected ? 1 : 0.5,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={r.selected}
+                  onChange={(e) => update(i, { selected: e.target.checked })}
+                  aria-label="Use this symbol"
+                />
+                <img
+                  src={`data:image/png;base64,${r.cand.glyph_base64}`}
+                  alt="symbol glyph"
+                  style={{
+                    width: 40,
+                    height: 40,
+                    objectFit: "contain",
+                    background: "var(--sheet)",
+                    border: "1px solid var(--hairline)",
+                    borderRadius: 4,
+                    flexShrink: 0,
+                  }}
+                />
+                <img
+                  src={`data:image/png;base64,${r.cand.label_base64}`}
+                  alt="legend label"
+                  title="Legend label from the drawing"
+                  style={{ height: 26, objectFit: "contain", maxWidth: 170 }}
+                />
+                <input
+                  value={r.name}
+                  disabled={!r.selected}
+                  onChange={(e) => update(i, { name: e.target.value })}
+                  placeholder="Name this symbol"
+                  style={{ marginLeft: "auto", width: 200 }}
+                />
+              </div>
+            ))}
+          </div>
+        )}
 
         <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
           <button onClick={props.onClose}>Cancel</button>
-          <button className="primary" style={{ marginLeft: "auto" }} disabled={added.length === 0} onClick={props.onContinue}>
-            Continue to Review
+          <button
+            className="primary"
+            style={{ marginLeft: "auto" }}
+            disabled={busy || loading || selected.length === 0 || !allNamed}
+            onClick={confirm}
+          >
+            {busy
+              ? "Saving…"
+              : `Confirm ${selected.length} symbol${selected.length === 1 ? "" : "s"} → Review`}
           </button>
         </div>
       </div>

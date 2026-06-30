@@ -52,6 +52,7 @@ export function ProposalPage(props: {
                   <th style={{ padding: "6px 8px", textAlign: "right" }}>QTY</th>
                   <th style={{ padding: "6px 8px", textAlign: "right" }}>UNIT</th>
                   <th style={{ padding: "6px 8px", textAlign: "right" }}>MATERIAL</th>
+                  <th style={{ padding: "6px 8px" }}>SOURCE</th>
                   <th style={{ padding: "6px 8px" }}>STATUS</th>
                   <th style={{ padding: "6px 8px" }}></th>
                 </tr>
@@ -70,6 +71,27 @@ export function ProposalPage(props: {
                       <td className="mono" style={{ padding: "8px", textAlign: "right" }}>{it.quantity}</td>
                       <td className="mono" style={{ padding: "8px", textAlign: "right" }}>${money(it.unit_price)}</td>
                       <td className="mono" style={{ padding: "8px", textAlign: "right" }}>${money(it.total)}</td>
+                      <td style={{ padding: "8px" }}>
+                        {it.source_url ? (
+                          <a
+                            href={it.source_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            title={`${it.supplier ?? "supplier"} — open Google Shopping to cross-check this price`}
+                            style={{ fontSize: 12, color: "var(--accent)", textDecoration: "none" }}
+                          >
+                            {it.supplier ? `${it.supplier} ↗` : "verify ↗"}
+                            {it.offers && it.offers.length > 1 ? (
+                              <span className="muted" style={{ fontSize: 10 }}> +{it.offers.length - 1}</span>
+                            ) : null}
+                          </a>
+                        ) : (
+                          <span className="muted" style={{ fontSize: 11 }}>
+                            {it.price_source === "brightdata" ? "live" : it.price_source ?? "—"}
+                          </span>
+                        )}
+                      </td>
                       <td style={{ padding: "8px" }}>
                         {it.reviewed ? <span className="chip" style={{ fontSize: 10, padding: "1px 6px" }}>reviewed</span>
                           : it.lowConf > 0 ? <span className="chip warn" style={{ fontSize: 10, padding: "1px 6px" }}>{it.lowConf} low-conf</span>

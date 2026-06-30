@@ -13,6 +13,7 @@ from ..models import (
     Takeoff,
     TakeoffOut,
     TakeoffRequest,
+    Template,
 )
 from ..services.pricing import build_proposal_text
 from ..services.proposal_export import export_pdf
@@ -54,10 +55,24 @@ async def run_takeoff(
     db.commit()
     db.refresh(takeoff)
 
+    # Confirmed symbol templates (auto-detected from the legend). Sent to the
+    # worker for matching; if empty, the worker uses its embedded defaults.
+    templates = (
+        db.query(Template)
+        .filter(Template.project_id == project_id)
+        .order_by(Template.created_at)
+        .all()
+    )
+
     try:
         result = await call_analyze_drawing(
             project_name=proj.name,
             image_path=Path(drawing.filepath),
+            templates=[
+                {"sym_type": t.sym_type, "label": t.label,
+                 "filepath": t.filepath, "threshold": t.threshold}
+                for t in templates
+            ],
         )
 
         if result.get("status") == "error":

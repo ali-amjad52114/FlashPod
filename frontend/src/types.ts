@@ -43,6 +43,13 @@ export interface Detection {
 //             | "brightdata" (live) | "manual" (user-corrected)
 export type PriceSource = "static" | "fallback" | "brightdata" | "manual";
 
+export interface Offer {
+  supplier: string;
+  price: number;
+  url: string;
+  title: string;
+}
+
 export interface PricedItem {
   type: string;
   label: string;
@@ -52,8 +59,10 @@ export interface PricedItem {
   boxes: number[][]; // [[x, y, w, h], ...] in original image pixels
   price_source?: PriceSource;
   vendor?: string;
-  source_url?: string;
+  supplier?: string; // cheapest supplier (Bright Data)
+  source_url?: string; // link to the Google Shopping listing (cross-check)
   matched_title?: string;
+  offers?: Offer[]; // every Bright Data offer (supplier/price/url), cheapest-first
 }
 
 export type TakeoffStatus = "pending" | "running" | "done" | "error";

@@ -110,7 +110,7 @@ export function ProjectPage(props: {
       {setupOpen && project && drawing && previewUrl && (
         <SymbolSetupModal
           project={project}
-          imageUrl={previewUrl}
+          drawing={drawing}
           onClose={() => setSetupOpen(false)}
           onContinue={() => props.onReadyUpload(project, drawing, previewUrl)}
         />

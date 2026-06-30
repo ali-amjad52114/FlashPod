@@ -5,3 +5,7 @@ python-multipart>=0.0.9
 httpx>=0.27.0
 python-dotenv>=1.0.0
 aiofiles>=23.2.1
+# legend auto-detection (services/legend.py)
+opencv-python-headless>=4.9.0
+numpy>=1.26.0
+pillow>=10.0.0

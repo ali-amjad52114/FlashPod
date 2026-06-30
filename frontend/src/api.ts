@@ -62,6 +62,43 @@ export function listTemplates(projectId: number): Promise<Template[]> {
   return fetch(`${BASE}/projects/${projectId}/templates`).then((r) => jsonOrThrow<Template[]>(r));
 }
 
+// --- Auto-detect symbols from the drawing's legend (Option A) ---
+export interface SymbolCandidate {
+  index: number;
+  bbox: [number, number, number, number]; // [x, y, w, h]
+  glyph_base64: string;
+  label_base64: string;
+}
+export interface AutoSymbolsResult {
+  candidates: SymbolCandidate[];
+  image_width: number;
+  image_height: number;
+}
+export interface ConfirmSymbol {
+  bbox: number[];
+  sym_type: string;
+  label: string;
+  threshold: number;
+}
+
+export function autoDetectSymbols(projectId: number, drawingId: number): Promise<AutoSymbolsResult> {
+  return fetch(`${BASE}/projects/${projectId}/drawings/${drawingId}/auto-symbols`, {
+    method: "POST",
+  }).then((r) => jsonOrThrow<AutoSymbolsResult>(r));
+}
+
+export function confirmSymbols(
+  projectId: number,
+  drawingId: number,
+  symbols: ConfirmSymbol[],
+): Promise<Template[]> {
+  return fetch(`${BASE}/projects/${projectId}/drawings/${drawingId}/confirm-symbols`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ symbols }),
+  }).then((r) => jsonOrThrow<Template[]>(r));
+}
+
 // --- Takeoff ---
 // NOTE: this POST BLOCKS until the worker finishes (cold start ~30-120s) and
 // the backend has overlaid Bright Data prices. It returns the final TakeoffOut

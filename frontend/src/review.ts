@@ -26,6 +26,9 @@ export interface ReviewModel {
   unitPriceByType: Record<string, number>;
   labelByType: Record<string, string>;
   sourceByType: Record<string, PriceSource>;
+  supplierByType: Record<string, string>;
+  sourceUrlByType: Record<string, string>;
+  offersByType: Record<string, import("./types").Offer[]>;
 }
 
 export interface ReviewLineItem extends PricedItem {
@@ -43,17 +46,26 @@ export function buildReviewModel(t: Takeoff): ReviewModel {
   const unitPriceByType: Record<string, number> = {};
   const labelByType: Record<string, string> = {};
   const sourceByType: Record<string, PriceSource> = {};
+  const supplierByType: Record<string, string> = {};
+  const sourceUrlByType: Record<string, string> = {};
+  const offersByType: Record<string, import("./types").Offer[]> = {};
   for (const it of t.priced_items ?? []) {
     unitPriceByType[it.type] = it.unit_price;
     labelByType[it.type] = it.label;
     sourceByType[it.type] = it.price_source ?? "static";
+    if (it.supplier || it.vendor) supplierByType[it.type] = it.supplier ?? it.vendor ?? "";
+    if (it.source_url) sourceUrlByType[it.type] = it.source_url;
+    if (it.offers?.length) offersByType[it.type] = it.offers;
   }
   for (const d of detections) {
     if (!(d.type in unitPriceByType)) unitPriceByType[d.type] = 5;
     if (!(d.type in labelByType)) labelByType[d.type] = d.label;
     if (!(d.type in sourceByType)) sourceByType[d.type] = "static";
   }
-  return { detections, unitPriceByType, labelByType, sourceByType };
+  return {
+    detections, unitPriceByType, labelByType, sourceByType,
+    supplierByType, sourceUrlByType, offersByType,
+  };
 }
 
 export function activeDetections(m: ReviewModel): RDetection[] {
@@ -81,6 +93,9 @@ export function deriveLineItems(m: ReviewModel): ReviewLineItem[] {
       total: round2(unit * qty),
       boxes: group.map((d) => [d.x, d.y, d.w, d.h]),
       price_source: src,
+      supplier: m.supplierByType[type],
+      source_url: m.sourceUrlByType[type],
+      offers: m.offersByType[type],
       lowConf: group.filter((d) => d.confidence < LOW_CONF).length,
       reviewed: group.some((d) => d.manual) || src === "manual",
     };
