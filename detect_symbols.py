@@ -116,6 +116,8 @@ async def detect_symbols(payload: dict) -> dict:
         catalog_txt = "\n".join(f"- {s['type']}: {s['desc']}" for s in catalog)
         max_long = int(payload.get("max_long_side", 1568))
 
+        _raw_samples = []
+
         def detect_in(region):
             """Run the VLM on one image region; return dets in that region's px coords."""
             rw0, rh0 = region.size
@@ -143,6 +145,8 @@ async def detect_symbols(payload: dict) -> dict:
             trimmed = [o[len(i):] for i, o in zip(inputs.input_ids, gen)]
             raw_txt = processor.batch_decode(trimmed, skip_special_tokens=True,
                                              clean_up_tokenization_spaces=False)[0]
+            if len(_raw_samples) < 3:
+                _raw_samples.append(raw_txt[:400])
             out = []
             for obj in re.findall(r"\{[^{}]*\}", raw_txt, re.DOTALL):
                 try:
@@ -242,6 +246,7 @@ async def detect_symbols(payload: dict) -> dict:
                 "raw_dets": len(raw_dets),   # detections across all tiles (pre-dedup)
                 "kept": len(kept),           # after cross-tile dedup
                 "emitted_types": _emitted,
+                "raw_samples": _raw_samples,  # raw model text from first few tiles
             },
             "timestamp": datetime.now().isoformat(),
         }

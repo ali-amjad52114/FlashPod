@@ -1,13 +1,14 @@
-export type Step = "project" | "review" | "proposal";
+export type Step = "home" | "project" | "review" | "proposal";
 
-const STEPS: { key: Step; n: number; label: string }[] = [
+const STEPS: { key: Exclude<Step, "home">; n: number; label: string }[] = [
   { key: "project", n: 1, label: "Project" },
   { key: "review", n: 2, label: "Review" },
   { key: "proposal", n: 3, label: "Proposal" },
 ];
 
-export function TopBar(props: { step: Step; jobsCount: number; onJobs: () => void; onHome: () => void }) {
+export function TopBar(props: { step: Step; jobsCount: number; onJobs: () => void; onHome: () => void; onStart: () => void }) {
   const order = STEPS.findIndex((s) => s.key === props.step);
+  const showSteps = props.step !== "home";
   return (
     <header
       className="hairline"
@@ -22,32 +23,37 @@ export function TopBar(props: { step: Step; jobsCount: number; onJobs: () => voi
           Flash<span style={{ color: "var(--accent)" }}>Pod</span>
         </button>
 
-        <nav aria-label="Steps" style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          {STEPS.map((s, i) => {
-            const active = s.key === props.step;
-            const done = i < order;
-            return (
-              <span key={s.key} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                {i > 0 && <span className="muted" aria-hidden style={{ margin: "0 2px" }}>›</span>}
-                <span
-                  style={{
-                    display: "inline-flex", alignItems: "center", justifyContent: "center",
-                    width: 18, height: 18, borderRadius: "50%", fontSize: 11, fontWeight: 700,
-                    background: active ? "var(--accent)" : done ? "var(--ok)" : "var(--hairline)",
-                    color: active || done ? "#fff" : "var(--secondary)",
-                  }}
-                >
-                  {s.n}
+        {showSteps ? (
+          <nav aria-label="Steps" style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            {STEPS.map((s, i) => {
+              const active = s.key === props.step;
+              const done = i < order;
+              return (
+                <span key={s.key} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  {i > 0 && <span className="muted" aria-hidden style={{ margin: "0 2px" }}>›</span>}
+                  <span
+                    style={{
+                      display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      width: 18, height: 18, borderRadius: "50%", fontSize: 11, fontWeight: 700,
+                      background: active ? "var(--accent)" : done ? "var(--ok)" : "var(--hairline)",
+                      color: active || done ? "#fff" : "var(--secondary)",
+                    }}
+                  >
+                    {s.n}
+                  </span>
+                  <span style={{ fontSize: 12, fontWeight: active ? 700 : 500, color: active ? "var(--accent)" : "var(--secondary)" }}>
+                    {s.label}
+                  </span>
                 </span>
-                <span style={{ fontSize: 12, fontWeight: active ? 700 : 500, color: active ? "var(--accent)" : "var(--secondary)" }}>
-                  {s.label}
-                </span>
-              </span>
-            );
-          })}
-        </nav>
+              );
+            })}
+          </nav>
+        ) : (
+          <span className="badge">Proposal-ready electrical takeoffs</span>
+        )}
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+          {props.step === "home" && <button className="primary" onClick={props.onStart}>Start</button>}
           <button onClick={props.onJobs} aria-label="Open proposals">
             Proposals{props.jobsCount > 0 ? ` · ${props.jobsCount}` : ""}
           </button>

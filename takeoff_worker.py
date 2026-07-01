@@ -205,7 +205,7 @@ async def analyze_drawing(payload: dict) -> dict:
                     headers={"Authorization": "Bearer " + _BD_TOKEN,
                              "Content-Type": "application/json"},
                     json={"zone": _BD_ZONE, "url": url, "format": "raw"},
-                    timeout=45,
+                    timeout=20,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -303,6 +303,19 @@ async def analyze_drawing(payload: dict) -> dict:
         for d in detections:
             if d["type"] not in types_in_order:
                 types_in_order.append(d["type"])
+
+        # Pre-fetch every price query CONCURRENTLY (they're independent) so pricing
+        # costs ~one call's latency, not 7 sequential calls each with retries. Results
+        # land in _bd_cache; the loop below then reads them instantly.
+        import concurrent.futures
+        _queries = []
+        for st in types_in_order:
+            grp = [d for d in detections if d["type"] == st]
+            _queries.append(grp[0].get("description") or search_query(st, grp[0]["label"]))
+        _uniq = list(dict.fromkeys(_queries))
+        if _uniq:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(_uniq))) as _ex:
+                list(_ex.map(bright_data_offers, _uniq))
 
         # --- 4. price: Bright Data SERP offers, static PRICE_TABLE fallback ---
         for sym_type in types_in_order:
